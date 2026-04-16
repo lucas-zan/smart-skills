@@ -1,0 +1,60 @@
+{
+  "policy": {
+    "defaults": {
+      "base_branch_strategy": "current-branch",
+      "feature_branch_prefix": "agent",
+      "share_branch_prefix": "share"
+    },
+    "verify": {
+      "command": "cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test"
+    },
+    "evidence": {
+      "enforce_before_commit": true,
+      "require_requirements": true,
+      "require_design": true,
+      "require_tests": true
+    },
+    "share_and_land": {
+      "allow_direct": true,
+      "protected_branches": ["test", "release"],
+      "protected_branch_mode": "require-pull-request",
+      "reverify_on_base_change": true,
+      "max_reverify_attempts": 3
+    }
+  },
+  "workflows": {
+    "deploy.yml": {
+      "default_ref": "main",
+      "required_inputs": ["environment"],
+      "allowed_inputs": ["environment", "service", "image_tag", "dry_run", "release_note"],
+      "default_inputs": {
+        "service": "web",
+        "dry_run": "false"
+      },
+      "presets": {
+        "staging": {
+          "environment": "staging"
+        },
+        "prod": {
+          "environment": "prod",
+          "dry_run": "false"
+        }
+      }
+    },
+    "ci.yml": {
+      "default_ref": "main",
+      "required_inputs": [],
+      "allowed_inputs": ["test_scope", "changed_only"],
+      "default_inputs": {
+        "test_scope": "full",
+        "changed_only": "false"
+      },
+      "presets": {
+        "smoke": {
+          "test_scope": "smoke",
+          "changed_only": "true"
+        }
+      }
+    }
+  }
+}
