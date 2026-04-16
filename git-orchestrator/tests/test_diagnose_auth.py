@@ -14,6 +14,7 @@ class DiagnoseAuthTests(unittest.TestCase):
     def setUp(self) -> None:
         self.skills_env = ROOT.parent / ".env"
         self.skills_env_backup = self.skills_env.read_text() if self.skills_env.exists() else None
+        self.skills_env.unlink(missing_ok=True)
 
     def tearDown(self) -> None:
         if self.skills_env_backup is None:
@@ -22,7 +23,11 @@ class DiagnoseAuthTests(unittest.TestCase):
             self.skills_env.write_text(self.skills_env_backup)
 
     def run_script(self, *args: str, env=None, check: bool = True) -> subprocess.CompletedProcess[str]:
-        merged_env = os.environ.copy()
+        merged_env = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": os.environ.get("HOME", ""),
+            "TMPDIR": os.environ.get("TMPDIR", ""),
+        }
         if env is not None:
             merged_env.update(env)
         return subprocess.run(
@@ -46,6 +51,8 @@ class DiagnoseAuthTests(unittest.TestCase):
         self.assertEqual(payload["remote_kind"], "github_https")
         self.assertEqual(payload["github_owner"], "example")
         self.assertEqual(payload["github_repo"], "repo")
+        self.assertTrue(payload["checks"]["github_api_auth_ready"])
+        self.assertTrue(payload["checks"]["release_dispatch_auth_ready"])
 
     def test_github_https_without_token_reports_advice(self) -> None:
         result = self.run_script(
@@ -56,7 +63,20 @@ class DiagnoseAuthTests(unittest.TestCase):
 
         payload = json.loads(result.stdout)
         self.assertFalse(payload["ready"])
+        self.assertFalse(payload["checks"]["github_api_auth_ready"])
+        self.assertFalse(payload["checks"]["release_dispatch_auth_ready"])
         self.assertIn("Export CLAW_GITHUB_TOKEN", "\n".join(payload["advice"]))
+
+    def test_github_https_with_token_reports_release_auth_ready_but_config_is_separate(self) -> None:
+        result = self.run_script(
+            "--remote-url",
+            "https://github.com/example/repo.git",
+            env={"CLAW_GITHUB_TOKEN": "demo-token"},
+        )
+
+        payload = json.loads(result.stdout)
+        self.assertTrue(payload["checks"]["release_dispatch_auth_ready"])
+        self.assertIn("release.after_merge", "\n".join(payload["advice"]))
 
     def test_github_https_uses_skills_dotenv_token_when_shell_env_is_empty(self) -> None:
         self.skills_env.write_text("CLAW_GITHUB_TOKEN=dotenv-token\n")
@@ -97,7 +117,12 @@ class DiagnoseAuthTests(unittest.TestCase):
             result = subprocess.run(
                 ["uv", "run", "python", str(SCRIPT)],
                 cwd=repo,
-                env={**os.environ, "CLAW_GITHUB_TOKEN": "demo-token"},
+                env={
+                    "PATH": os.environ.get("PATH", ""),
+                    "HOME": os.environ.get("HOME", ""),
+                    "TMPDIR": os.environ.get("TMPDIR", ""),
+                    "CLAW_GITHUB_TOKEN": "demo-token",
+                },
                 check=True,
                 capture_output=True,
                 text=True,

@@ -5,11 +5,13 @@ import os
 from pathlib import Path
 from typing import Dict
 
+from repo_policy import resolve_config_path
+
 DEFAULT_CONFIG_FILE = ".git-orchestrator.json"
 
 
-def load_json(path: str) -> Dict:
-    config_path = Path(path)
+def load_json(repo_root: Path, path: str) -> Dict:
+    config_path = resolve_config_path(repo_root, path)
     if not config_path.is_file():
         raise SystemExit(f"Workflow config file not found: {config_path}")
     try:
@@ -39,7 +41,7 @@ def main() -> int:
     parser.add_argument("--format", choices=["json", "kv"], default="json")
     args = parser.parse_args()
 
-    config = load_json(args.config)
+    config = load_json(Path.cwd(), args.config)
     workflow_cfg = config.get("workflows", {}).get(args.workflow)
     if not workflow_cfg:
         raise SystemExit(f"Workflow '{args.workflow}' is not configured in {args.config}")

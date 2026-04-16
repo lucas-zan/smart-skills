@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Comma-separated platforms to package."
+        required: true
+        default: "macos,linux"
+      publish:
+        description: "Whether to publish a GitHub release."
+        required: false
+        default: "true"
+      version:
+        description: "Release version tag. Leave empty to auto-generate."
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        shell: bash
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            version="${{ github.event.inputs.version }}"
+          else
+            version="v$(date +%Y.%m.%d)-${{ github.sha }}"
+            version="${version:0:19}"
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+  package:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            runner: ubuntu-latest
+          - platform: macos
+            runner: macos-latest
+    if: ${{ contains(format(',{0},', github.event.inputs.platforms), format(',{0},', matrix.platform)) }}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build release archive
+        shell: bash
+        run: |
+          mkdir -p dist
+          archive="${{ github.event.repository.name }}-${{ needs.prepare.outputs.version }}-${{ matrix.platform }}.tar.gz"
+          tar --exclude=.git --exclude=.github --exclude=dist -czf "dist/${archive}" .
+      - name: Upload packaged asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: dist/*.tar.gz
+
+  publish:
+    needs: [prepare, package]
+    if: ${{ needs.package.result == 'success' && github.event.inputs.publish == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download packaged assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        shell: bash
+        run: |
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release upload "$VERSION" release-assets/* --clobber
+          else
+            gh release create "$VERSION" release-assets/* --title "$VERSION" --generate-notes --target "${{ github.sha }}"
+          fi

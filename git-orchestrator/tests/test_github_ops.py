@@ -1,5 +1,7 @@
 import importlib.util
 import io
+import json
+import tempfile
 import types
 import unittest
 from contextlib import redirect_stdout
@@ -28,8 +30,29 @@ class FakeClient:
 
     def request(self, method, path, body=None, query=None):
         self.calls.append((method, path, body, query))
+        if method == "PUT" and path.endswith("/pulls/9/merge"):
+            return {
+                "merged": True,
+                "sha": "abc123",
+                "message": "Pull Request successfully merged",
+            }
         if method == "POST" and path.endswith("/dispatches"):
             return {}
+        if method == "GET" and path.endswith("/actions/workflows/release.yml/runs"):
+            return {
+                "workflow_runs": [
+                    {
+                        "id": 91,
+                        "status": "queued",
+                        "conclusion": None,
+                        "html_url": "https://example.test/runs/91",
+                        "head_branch": "main",
+                        "created_at": "2026-04-14T10:00:05Z",
+                        "event": "workflow_dispatch",
+                        "name": "release",
+                    }
+                ]
+            }
         if method == "GET" and path.endswith("/actions/workflows/deploy.yml/runs"):
             return {
                 "workflow_runs": [
@@ -203,6 +226,140 @@ class GitHubOpsTests(unittest.TestCase):
         payload = module.json.loads(stdout.getvalue())
         self.assertEqual(payload["run"]["id"], 77)
         self.assertEqual(payload["run"]["conclusion"], "success")
+
+    def test_dispatch_release_uses_configured_workflow_and_platforms(self) -> None:
+        module = load_module()
+        client = FakeClient()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / ".git-orchestrator.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "release": {
+                            "after_merge": {
+                                "enabled": True,
+                                "workflow": "release.yml",
+                                "platforms": ["macos", "linux"],
+                                "platform_input": "platforms",
+                                "inputs": {"publish": "true"},
+                            }
+                        },
+                        "workflows": {
+                            "release.yml": {
+                                "default_ref": "main",
+                                "required_inputs": ["platforms", "publish"],
+                                "allowed_inputs": ["platforms", "publish"],
+                            }
+                        },
+                    }
+                )
+            )
+
+            args = types.SimpleNamespace(
+                config=str(config),
+                ref=None,
+                wait=False,
+                timeout=30,
+                interval=1,
+                input=[],
+            )
+
+            stdout = io.StringIO()
+            with patch.object(module.time, "time", side_effect=[1000.0, 1000.1]), redirect_stdout(stdout):
+                module.cmd_dispatch_release(client, args)
+
+        payload = module.json.loads(stdout.getvalue())
+        self.assertTrue(payload["enabled"])
+        self.assertTrue(payload["dispatched"])
+        self.assertEqual(payload["workflow"], "release.yml")
+        dispatch_call = next(
+            call for call in client.calls if call[0] == "POST" and call[1].endswith("/actions/workflows/release.yml/dispatches")
+        )
+        self.assertEqual(dispatch_call[2]["ref"], "main")
+        self.assertEqual(dispatch_call[2]["inputs"]["platforms"], "macos,linux")
+        self.assertEqual(dispatch_call[2]["inputs"]["publish"], "true")
+
+    def test_merge_pr_triggers_release_after_merge_when_enabled(self) -> None:
+        module = load_module()
+        client = FakeClient()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Path(tmp) / ".git-orchestrator.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "release": {
+                            "after_merge": {
+                                "enabled": True,
+                                "workflow": "release.yml",
+                                "platforms": ["macos", "linux"],
+                            }
+                        },
+                        "workflows": {
+                            "release.yml": {
+                                "default_ref": "main",
+                                "required_inputs": ["platforms"],
+                                "allowed_inputs": ["platforms"],
+                            }
+                        },
+                    }
+                )
+            )
+            args = types.SimpleNamespace(
+                number=9,
+                method="squash",
+                sha=None,
+                title=None,
+                message=None,
+                config=str(config),
+                release_ref=None,
+                skip_release_after_merge=False,
+                wait_release=False,
+                release_timeout=30,
+                release_interval=1,
+                release_input=[],
+            )
+
+            stdout = io.StringIO()
+            with patch.object(module.time, "time", side_effect=[1000.0, 1000.1]), redirect_stdout(stdout):
+                module.cmd_merge_pr(client, args)
+
+        payload = module.json.loads(stdout.getvalue())
+        self.assertTrue(payload["merged"])
+        self.assertIn("release", payload)
+        self.assertTrue(payload["release"]["dispatched"])
+        dispatch_call = next(
+            call for call in client.calls if call[0] == "POST" and call[1].endswith("/actions/workflows/release.yml/dispatches")
+        )
+        self.assertEqual(dispatch_call[2]["inputs"]["platforms"], "macos,linux")
+
+    def test_skill_directory_default_config_enables_release_after_merge(self) -> None:
+        module = load_module()
+        repo_config = ROOT / ".git-orchestrator.json"
+
+        release = module.resolve_release_dispatch(
+            config_path=str(repo_config),
+            ref=None,
+            extra_inputs={},
+        )
+
+        self.assertTrue(release["enabled"])
+        self.assertEqual(release["workflow"], "release.yml")
+        self.assertEqual(release["ref"], "main")
+        self.assertEqual(release["inputs"]["platforms"], "macos,linux")
+        self.assertEqual(release["inputs"]["publish"], "true")
+
+    def test_default_config_path_falls_back_to_skill_directory(self) -> None:
+        module = load_module()
+        release = module.resolve_release_dispatch(
+            config_path=module.DEFAULT_CONFIG_FILE,
+            ref=None,
+            extra_inputs={},
+        )
+
+        self.assertTrue(release["enabled"])
+        self.assertEqual(release["workflow"], "release.yml")
 
 
 if __name__ == "__main__":

@@ -32,3 +32,4 @@ vendor/claw-code/.claude.json
 
 
 __pycache__
+.pytest_cache

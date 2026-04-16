@@ -1,5 +1,6 @@
 import os
 import json
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -13,6 +14,9 @@ SCRIPT = ROOT / "scripts" / "git_share_and_land.sh"
 class GitShareAndLandTests(unittest.TestCase):
     def write_policy(self, repo: Path, policy: dict) -> None:
         (repo / ".git-orchestrator.json").write_text(json.dumps({"policy": policy}, indent=2))
+
+    def write_config(self, repo: Path, payload: dict) -> None:
+        (repo / ".git-orchestrator.json").write_text(json.dumps(payload, indent=2))
 
     def test_requires_explicit_confirmation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -448,6 +452,141 @@ class GitShareAndLandTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("merge=pull_request_required", result.stdout)
+
+    def test_merge_success_triggers_release_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            worker = root / "worker"
+
+            self.init_remote(remote, seed)
+            self.clone(remote, worker)
+
+            self.git(worker, "config", "user.email", "test@example.com")
+            self.git(worker, "config", "user.name", "tester")
+            self.write_config(
+                worker,
+                {
+                    "policy": {
+                        "share_and_land": {"allow_direct": True},
+                        "evidence": {"enforce_before_commit": False},
+                    },
+                    "release": {
+                        "after_merge": {
+                            "enabled": True,
+                            "workflow": "release.yml",
+                            "platforms": ["macos", "linux"],
+                        }
+                    },
+                    "workflows": {
+                        "release.yml": {
+                            "default_ref": "main",
+                            "required_inputs": ["platforms"],
+                            "allowed_inputs": ["platforms"],
+                        }
+                    },
+                },
+            )
+            (worker / "local.txt").write_text("from worker\n")
+
+            fakebin, record_path = self.make_uv_wrapper(root)
+            result = self.run_script(
+                worker,
+                "--confirmed",
+                "--slug",
+                "demo",
+                "--subject",
+                "feat(repo): share worker change",
+                env={
+                    "VERIFY_CMD": "true",
+                    "GIT_ORCHESTRATOR_BRANCH_DATE": "20260415010203",
+                    "PATH": f"{fakebin}{os.pathsep}{os.environ['PATH']}",
+                    "GIT_ORCHESTRATOR_RELEASE_RECORD": str(record_path),
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("merge=done", result.stdout)
+            self.assertIn("release=triggered", result.stdout)
+            record = record_path.read_text()
+            self.assertIn("dispatch-release", record)
+            self.assertIn("--ref", record)
+            self.assertIn("main", record)
+
+    def test_with_release_bootstraps_release_assets_before_merge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            worker = root / "worker"
+
+            self.init_remote(remote, seed)
+            self.clone(remote, worker)
+
+            self.git(worker, "config", "user.email", "test@example.com")
+            self.git(worker, "config", "user.name", "tester")
+            (worker / "docs" / "requirements").mkdir(parents=True)
+            (worker / "docs" / "design").mkdir(parents=True)
+            (worker / "tests").mkdir()
+            (worker / "docs" / "requirements" / "demo.md").write_text("requirement\n")
+            (worker / "docs" / "design" / "demo.md").write_text("design\n")
+            (worker / "tests" / "test_demo.py").write_text("def test_demo():\n    assert True\n")
+
+            fakebin, record_path = self.make_uv_wrapper(root)
+            result = self.run_script(
+                worker,
+                "--confirmed",
+                "--with-release",
+                "--slug",
+                "demo",
+                "--subject",
+                "build(release): bootstrap automation",
+                "--requirement",
+                "docs/requirements/demo.md",
+                "--design",
+                "docs/design/demo.md",
+                "--test",
+                "tests/test_demo.py",
+                env={
+                    "VERIFY_CMD": "true",
+                    "GIT_ORCHESTRATOR_BRANCH_DATE": "20260415010203",
+                    "PATH": f"{fakebin}{os.pathsep}{os.environ['PATH']}",
+                    "GIT_ORCHESTRATOR_RELEASE_RECORD": str(record_path),
+                },
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("release=triggered", result.stdout)
+            self.assertIn("release_bootstrap=created", result.stdout)
+
+            landed = root / "landed"
+            self.clone(remote, landed)
+            self.assertTrue((landed / ".git-orchestrator.json").is_file())
+            self.assertTrue((landed / ".github" / "workflows" / "release.yml").is_file())
+            self.assertFalse((landed / "git-orchestrator").exists())
+            self.assertIn("workflow_dispatch:", (landed / ".github" / "workflows" / "release.yml").read_text())
+
+    def make_uv_wrapper(self, root: Path) -> tuple[Path, Path]:
+        real_uv = shutil.which("uv")
+        self.assertIsNotNone(real_uv)
+
+        fakebin = root / "fakebin"
+        fakebin.mkdir()
+        record_path = root / "release-dispatch.log"
+        wrapper = fakebin / "uv"
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            "if [ \"$1\" = \"run\" ] && [ \"$2\" = \"python\" ] && "
+            "printf '%s' \"$3\" | grep -q 'github_ops.py$' && [ \"$4\" = \"dispatch-release\" ]; then\n"
+            "  printf '%s\\n' \"$@\" > \"$GIT_ORCHESTRATOR_RELEASE_RECORD\"\n"
+            "  printf '{\"enabled\": true, \"dispatched\": true, \"run\": {\"id\": 88, \"html_url\": \"https://example.test/runs/88\"}}\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            f"exec \"{real_uv}\" \"$@\"\n"
+        )
+        wrapper.chmod(0o755)
+        return fakebin, record_path
 
     def init_repo(self, root: Path) -> Path:
         self.git(root, "init")

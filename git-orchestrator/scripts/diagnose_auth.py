@@ -63,10 +63,14 @@ def build_diagnosis(remote_url: str) -> dict:
     remote_kind = classify_remote(remote_url)
     owner, repo = infer_github_repo(remote_url)
     token_present = bool(get_env("CLAW_GITHUB_TOKEN"))
+    github_api_auth_ready = remote_kind == "github_https" and token_present
+    release_dispatch_auth_ready = github_api_auth_ready
 
     checks = {
         "uses_https_for_github": remote_kind == "github_https",
         "claw_github_token_present": token_present,
+        "github_api_auth_ready": github_api_auth_ready,
+        "release_dispatch_auth_ready": release_dispatch_auth_ready,
     }
     advice: list[str] = []
 
@@ -84,6 +88,8 @@ def build_diagnosis(remote_url: str) -> dict:
 
     if remote_kind == "github_https" and not token_present:
         advice.append("Export CLAW_GITHUB_TOKEN in the current shell or set it in skills/.env before git or GitHub API operations.")
+    elif github_api_auth_ready:
+        advice.append("GitHub API auth is ready. If post-merge release still does not run, check .git-orchestrator.json release.after_merge and workflow inputs/tests.")
 
     return {
         "remote_url": remote_url,

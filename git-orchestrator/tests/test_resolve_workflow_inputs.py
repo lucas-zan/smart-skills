@@ -50,6 +50,36 @@ class ResolveWorkflowInputsTests(unittest.TestCase):
         self.assertIn("Missing required workflow inputs: environment", result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
+    def test_default_config_path_falls_back_to_skill_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "git-orchestrator" / ".git-orchestrator.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "workflows": {
+                            "release.yml": {
+                                "default_ref": "main",
+                                "required_inputs": ["platforms"],
+                                "allowed_inputs": ["platforms", "publish"],
+                                "default_inputs": {
+                                    "platforms": "macos,linux",
+                                    "publish": "true",
+                                },
+                            }
+                        }
+                    }
+                )
+            )
+
+            result = self.script(root, "--workflow", "release.yml")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["ref"], "main")
+        self.assertEqual(payload["inputs"]["platforms"], "macos,linux")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,6 +30,29 @@ class RepoPolicyTests(unittest.TestCase):
         self.assertEqual(share_and_land["allowed_conflict_paths"], [])
         self.assertEqual(share_and_land["blocked_conflict_paths"], [])
         self.assertEqual(share_and_land["max_conflict_resolution_attempts"], 3)
+
+    def test_default_config_path_falls_back_to_skill_directory(self) -> None:
+        module = load_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            config_path = repo_root / "git-orchestrator" / ".git-orchestrator.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "policy": {
+                            "share_and_land": {
+                                "allow_direct": False,
+                            }
+                        }
+                    }
+                )
+            )
+
+            policy = module.load_policy(repo_root)
+
+        self.assertFalse(policy["share_and_land"]["allow_direct"])
 
 
 if __name__ == "__main__":

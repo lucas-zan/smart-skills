@@ -7,6 +7,7 @@ from typing import Any, Dict
 
 
 DEFAULT_CONFIG_FILE = ".git-orchestrator.json"
+FALLBACK_CONFIG_FILE = "git-orchestrator/.git-orchestrator.json"
 DEFAULT_POLICY = {
     "defaults": {
         "base_branch_strategy": "current-branch",
@@ -81,8 +82,19 @@ def find_repo_root(start: Path) -> Path:
         return start
 
 
-def load_policy(repo_root: Path, config_path: str = DEFAULT_CONFIG_FILE) -> Dict[str, Any]:
+def resolve_config_path(repo_root: Path, config_path: str = DEFAULT_CONFIG_FILE) -> Path:
     path = repo_root / config_path
+    if path.is_file():
+        return path
+    if config_path == DEFAULT_CONFIG_FILE:
+        fallback = repo_root / FALLBACK_CONFIG_FILE
+        if fallback.is_file():
+            return fallback
+    return path
+
+
+def load_policy(repo_root: Path, config_path: str = DEFAULT_CONFIG_FILE) -> Dict[str, Any]:
+    path = resolve_config_path(repo_root, config_path)
     if not path.is_file():
         return deep_merge({}, DEFAULT_POLICY)
     payload = json.loads(path.read_text())

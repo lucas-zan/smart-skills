@@ -1,0 +1,44 @@
+{
+  "policy": {
+    "verify": {},
+    "evidence": {
+      "enforce_before_commit": true,
+      "require_requirements": true,
+      "require_design": true,
+      "require_tests": true
+    },
+    "share_and_land": {
+      "allow_direct": true,
+      "protected_branches": [],
+      "protected_branch_mode": "require-pull-request",
+      "reverify_on_base_change": true,
+      "max_reverify_attempts": 3,
+      "auto_resolve_conflicts": false,
+      "auto_resolve_conflicts_command": "",
+      "allowed_conflict_paths": [],
+      "blocked_conflict_paths": [],
+      "max_conflict_resolution_attempts": 3
+    }
+  },
+  "release": {
+    "after_merge": {
+      "enabled": true,
+      "workflow": "release.yml",
+      "platforms": ["macos", "linux"],
+      "platform_input": "platforms",
+      "inputs": {
+        "publish": "true"
+      }
+    }
+  },
+  "workflows": {
+    "release.yml": {
+      "default_ref": "main",
+      "required_inputs": ["platforms"],
+      "allowed_inputs": ["platforms", "publish", "version"],
+      "default_inputs": {
+        "publish": "true"
+      }
+    }
+  }
+}

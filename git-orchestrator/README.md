@@ -19,11 +19,12 @@
 
 ## 作用
 
-这个 skill 主要解决 3 个问题：
+这个 skill 主要解决 4 个问题：
 
 1. 把本地不可见的改动尽快推成远端分支，减少多人/多 agent 协作冲突。
 2. 在提交前统一执行 requirement / design / test evidence 校验。
 3. 用脚本约束交付顺序，避免“先 push 后验证”或“未确认直接合并”这类流程错误。
+4. 在用户明确要求 release 时，把 release 自动化文件补到当前分支里，再继续合并和发布。
 
 ## 能力边界
 
@@ -34,6 +35,8 @@
 - 提交并推送
 - 生成 PR body
 - 通过 GitHub API 创建 PR、查询 PR、查询 workflow、触发 workflow、合并 PR
+- 在 merge 成功后按配置自动触发 GitHub release workflow
+- 在 release 请求下自动补齐 `.git-orchestrator.json` 和 `.github/workflows/release.yml`
 - 执行 direct `share-and-land`
 
 它不能替你判断：
@@ -41,8 +44,10 @@
 - 改动本身是否合理
 - 仓库保护策略是否应该绕过
 - 线上发布是否应该执行
+- 业务代码应该如何修复
 
 如果 repo policy、远端权限或验证命令不满足，skill 应该停止，而不是继续冒险提交。
+这个 skill 的自动补齐能力只用于 release 自动化文件，不应该拿来修业务代码。
 
 ## 目录结构
 
@@ -95,6 +100,21 @@
 9. 无法安全解决时停止，交给人工处理
 10. 再合回基线分支并 push
 
+如果用户明确要求“直接 release”或“merge 后自动 release”，可以直接走：
+
+```bash
+bash scripts/git_share_and_land.sh --confirmed --with-release --slug <slug> --subject "<subject>"
+```
+
+`--with-release` 的行为是：
+
+- 如果仓库缺少 release 配置，就先把默认 `.git-orchestrator.json` 补到当前分支
+- 如果仓库缺少根目录 `.github/workflows/release.yml`，就先生成它
+- 这些文件会和当前分支的其他改动一起提交、合并
+- merge 成功后再触发 release workflow
+
+这个自动引导只会创建 release 自动化文件，不会改业务代码。
+
 如果验证失败，流程应停在 share branch，不继续落回基线。
 
 如果冲突自动解决失败、命中了禁止自动解决的路径，或者解决后验证失败，流程也应停止，不继续推送基线分支。
@@ -115,7 +135,8 @@
 
 如果需要 workflow preset 或 repo policy：
 
-- 在仓库根目录放 `.git-orchestrator.json`
+- 优先读取仓库根目录 `.git-orchestrator.json`
+- 对 skill 集合仓库，也支持回退读取 `git-orchestrator/.git-orchestrator.json`
 
 推荐优先使用：
 
@@ -161,7 +182,7 @@ git remote set-url origin https://github.com/<owner>/<repo>.git
 
 ## 推荐配置
 
-建议在仓库根目录放一个 `.git-orchestrator.json`，至少定义：
+建议提供一个 `.git-orchestrator.json`。普通业务仓库放在仓库根目录；像当前这种 skill 集合仓库，可以放在 `git-orchestrator/.git-orchestrator.json`。至少定义：
 
 - 默认分支策略
 - verification 命令
@@ -218,7 +239,7 @@ git remote set-url origin https://github.com/<owner>/<repo>.git
 
 ### 无配置时的默认行为
 
-如果仓库根目录没有 `.git-orchestrator.json`，skill 使用内建默认策略：
+如果默认位置都没有配置文件，skill 使用内建默认策略：
 
 - 当前分支就是默认基线分支
 - `agent/` 是默认 feature branch 前缀
@@ -237,12 +258,67 @@ git remote set-url origin https://github.com/<owner>/<repo>.git
 5. 提交并推送该分支
 6. 验证通过后再合回当前开发分支
 
-如果设置了 `.git-orchestrator.json`，就以配置为准。
+如果设置了配置文件，就以配置为准。
 
 例如：
 
 - 从 `main` 创建功能分支时，可能生成 `agent/main-20260415010203-fix-login-bug`
 - 从 `release` 做 share-and-land 时，可能生成 `share/release-20260415010203-doc-sync`
+
+### Merge 后自动触发 Release
+
+如果希望在合并成功后自动触发 GitHub release 流程，可以在配置文件里增加：
+
+```json
+{
+  "release": {
+    "after_merge": {
+      "enabled": true,
+      "workflow": "release.yml",
+      "platforms": ["macos", "linux"],
+      "platform_input": "platforms",
+      "inputs": {
+        "publish": "true"
+      }
+    }
+  },
+  "workflows": {
+    "release.yml": {
+      "default_ref": "main",
+      "required_inputs": ["platforms"],
+      "allowed_inputs": ["platforms", "publish", "version"],
+      "default_inputs": {
+        "publish": "true"
+      }
+    }
+  }
+}
+```
+
+说明：
+
+- `release.after_merge.enabled`: 开启 merge 后自动发布
+- `workflow`: 要 dispatch 的 GitHub Actions workflow
+- `platforms`: 需要发布的目标平台列表，默认会拼成逗号分隔字符串
+- `platform_input`: workflow 里接收平台列表的 input 名称，默认是 `platforms`
+- `inputs`: 额外透传给 workflow 的 inputs，比如 `publish=true`
+
+配置后，`git_share_and_land.sh` 在成功 push 基线分支后会自动触发 release workflow；`github_ops.py merge-pr` 在成功 merge PR 后也会执行相同动作。
+
+skill 目录里可以保存默认 workflow 模板，例如 `git-orchestrator/.github/workflows/release.yml`。如果目标仓库里还没有真正会被 GitHub 执行的 `.github/workflows/release.yml`，现在不需要手写。可以直接运行：
+
+```bash
+uv run python git-orchestrator/scripts/scaffold_release_workflow.py
+```
+
+这个脚本会根据配置文件生成一个默认的 release workflow，并写到目标仓库根目录的 `.github/workflows/release.yml`，包含：
+
+- `workflow_dispatch` 入口
+- `macos` / `linux` 打包矩阵
+- 默认的 `.tar.gz` 产物打包
+- 使用 `gh release create` / `gh release upload` 发布 GitHub Release
+
+这里有一个硬约束：GitHub 只能调度仓库根目录 `.github/workflows/` 下已经存在的 workflow 文件。所以 skill 目录里的 workflow 只能作为模板保存；真正让 GitHub 使用时，仍然需要在 merge 前生成到仓库根目录并提交上去。
 
 ### 建分支
 

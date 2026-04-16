@@ -14,8 +14,10 @@ Good fits:
 - open, inspect, sync, or merge a PR
 - trigger or watch a GitHub Actions workflow
 - share-and-land after explicit human confirmation
+- bootstrap release automation into the current branch before merge
 
 Do not use this skill for code review, design review, or deciding whether the change itself is correct.
+Do not use this skill to repair product code. Its automatic release bootstrap may create only release-automation files such as `.git-orchestrator.json` and `.github/workflows/release.yml`.
 
 ## Intent Router
 
@@ -30,6 +32,9 @@ Route the request before doing any work. Do not run the full submit flow when th
 | Inspect a PR | `uv run python scripts/github_ops.py get-pr ...` |
 | Sync a PR branch with base | `uv run python scripts/github_ops.py update-branch ...` |
 | Merge a PR | `uv run python scripts/github_ops.py merge-pr ...` |
+| Trigger the configured post-merge release flow | `uv run python scripts/github_ops.py dispatch-release ...` |
+| Merge current work and make release automation ready automatically | `bash scripts/git_share_and_land.sh --confirmed --with-release ...` |
+| Scaffold a default release workflow | `uv run python scripts/scaffold_release_workflow.py` |
 | Resolve workflow inputs | `uv run python scripts/resolve_workflow_inputs.py ...` |
 | Dispatch or watch a workflow run | `uv run python scripts/github_ops.py dispatch-workflow ...` or `wait-run ...` |
 | Share-and-land | `bash scripts/git_share_and_land.sh ...` |
@@ -74,8 +79,11 @@ Require these before PR or workflow operations:
 
 Require these before `resolve_workflow_inputs.py` or `dispatch-workflow`:
 - the target workflow supports `workflow_dispatch`
-- a repo-local `.git-orchestrator.json` exists if the flow depends on presets or default workflow inputs
+- a config file exists when the flow depends on presets or default workflow inputs; prefer repo-root `.git-orchestrator.json`, and fall back to `git-orchestrator/.git-orchestrator.json` in skill-collection repos
 - required workflow inputs are known; do not guess prod-facing values
+
+For post-merge release automation, the workflow file that GitHub will execute must exist in the repository root `.github/workflows/` before the merge that is going to dispatch it. A skill-local file such as `git-orchestrator/.github/workflows/release.yml` is only a template. If the executable root workflow is missing, scaffold it first with `uv run python scripts/scaffold_release_workflow.py`, review it, then submit that file through the normal git flow.
+When the user explicitly asks for merge-and-release, prefer `git_share_and_land.sh --with-release`; it may create the root `.git-orchestrator.json` and `.github/workflows/release.yml` on the current branch before commit and merge, but it must not modify product source files.
 
 ### Share-And-Land
 
@@ -103,6 +111,7 @@ Require these before `git_share_and_land.sh`:
    `uv run python scripts/github_ops.py create-pr ...`
 9. Inspect or sync the PR only when asked.
 10. Merge only when the user asked for merge and repository rules allow it.
+11. If the resolved config enables `release.after_merge`, trigger `uv run python scripts/github_ops.py dispatch-release ...` after merge success.
 
 ### Narrow PR / Workflow Operations
 
@@ -121,15 +130,17 @@ Do not create branches, generate commits, or open new PRs unless the request req
 2. Treat the current branch as the base branch unless the user names another one.
 3. Fetch the latest remote base branch.
 4. Create a `share/...` branch from the current local state.
-5. Commit dirty changes if needed; reuse local commits if already ahead.
-6. Rebase the share branch onto the latest remote base branch.
-7. Push the share branch first.
-8. Run repository verification with `bash scripts/verify_repo.sh` or `VERIFY_CMD`.
-9. If the base branch moved during verification, rebase, force-push with lease, and verify again.
-10. If conflicts occur, auto-resolve only when repo policy explicitly allows it and the conflicted paths are allowed.
-11. If verification fails, stop after the share-branch push.
-12. If the base branch is protected and policy requires a PR, stop after the share-branch push and report `merge=pull_request_required`.
-13. Only then merge back into the base branch and push the base branch.
+5. If `--with-release` was requested, ensure repo-root release automation files exist on the current branch before commit.
+6. Commit dirty changes if needed; reuse local commits if already ahead.
+7. Rebase the share branch onto the latest remote base branch.
+8. Push the share branch first.
+9. Run repository verification with `bash scripts/verify_repo.sh` or `VERIFY_CMD`.
+10. If the base branch moved during verification, rebase, force-push with lease, and verify again.
+11. If conflicts occur, auto-resolve only when repo policy explicitly allows it and the conflicted paths are allowed.
+12. If verification fails, stop after the share-branch push.
+13. If the base branch is protected and policy requires a PR, stop after the share-branch push and report `merge=pull_request_required`.
+14. Only then merge back into the base branch and push the base branch.
+15. If the resolved config enables `release.after_merge`, trigger `uv run python scripts/github_ops.py dispatch-release --ref <base-branch>`.
 
 ## Blocker Table
 
@@ -140,7 +151,7 @@ Stop on these markers. Do not improvise around them.
 | `--confirmed is required` | share-and-land was requested without explicit human confirmation | stop and ask for confirmation |
 | `No staged changes to commit` | `--no-add-all` was used but nothing is staged | stop and ask the user to stage files or remove `--no-add-all` |
 | `Missing required change basis` | requirement, design, or test evidence failed the gate | stop and ask for the missing evidence or matching files |
-| `Workflow config file not found` | workflow defaults were requested but `.git-orchestrator.json` is absent | stop and ask for config or explicit workflow inputs |
+| `Workflow config file not found` | workflow defaults were requested but neither repo-root `.git-orchestrator.json` nor `git-orchestrator/.git-orchestrator.json` was found | stop and ask for config or explicit workflow inputs |
 | `Missing required workflow inputs` | dispatch payload is incomplete | stop and ask for the missing keys |
 | `GitHub remote must use HTTPS` | auth path is SSH or HTTP instead of GitHub HTTPS | stop and switch the remote to HTTPS |
 | `Missing CLAW_GITHUB_TOKEN` | GitHub HTTPS auth is unavailable from the environment and `skills/.env` | stop and ask for token setup |

@@ -30,6 +30,14 @@ ALLOWED_CONFLICT_PATHS="[]"
 BLOCKED_CONFLICT_PATHS="[]"
 MAX_CONFLICT_RESOLUTION_ATTEMPTS=0
 VERIFY_AFTER_LANDING=0
+RELEASE_STATUS="not_configured"
+RELEASE_WORKFLOW=""
+RELEASE_RUN_ID=""
+RELEASE_URL=""
+WITH_RELEASE=0
+RELEASE_BOOTSTRAP_STATUS="not_requested"
+RELEASE_BOOTSTRAP_CONFIG_PATH=""
+RELEASE_BOOTSTRAP_WORKFLOW_PATH=""
 
 run_python() {
   uv run python "$@"
@@ -37,7 +45,7 @@ run_python() {
 
 usage() {
   cat <<'USAGE'
-Usage: git_share_and_land.sh --confirmed --slug <slug> [--base <branch>] [--prefix <prefix>] [--subject <message>] [--body <details>] [--context <summary>] [--remote <remote>] [--verify-cmd <cmd>] [--requirement <path>] [--design <path>] [--test <path>] [--no-add-all] [--merge-mode <merge|ff-only>]
+Usage: git_share_and_land.sh --confirmed --slug <slug> [--with-release] [--base <branch>] [--prefix <prefix>] [--subject <message>] [--body <details>] [--context <summary>] [--remote <remote>] [--verify-cmd <cmd>] [--requirement <path>] [--design <path>] [--test <path>] [--no-add-all] [--merge-mode <merge|ff-only>]
 USAGE
 }
 
@@ -54,13 +62,20 @@ branch_date_stamp() {
 }
 
 summary() {
-  printf 'base_branch=%s\nfeature_branch=%s\nverification=%s\nmerge=%s\nconflict_resolution=%s\nconflict_context=%s\n' \
+  printf 'base_branch=%s\nfeature_branch=%s\nverification=%s\nmerge=%s\nconflict_resolution=%s\nconflict_context=%s\nrelease_bootstrap=%s\nrelease_bootstrap_config=%s\nrelease_bootstrap_workflow=%s\nrelease=%s\nrelease_workflow=%s\nrelease_run_id=%s\nrelease_url=%s\n' \
     "${BASE_BRANCH:-}" \
     "${FEATURE_BRANCH:-}" \
     "${VERIFICATION_STATUS:-not_run}" \
     "${MERGE_STATUS:-not_attempted}" \
     "${CONFLICT_RESOLUTION_STATUS:-not_needed}" \
-    "${CONFLICT_RESOLUTION_CONTEXT:-none}"
+    "${CONFLICT_RESOLUTION_CONTEXT:-none}" \
+    "${RELEASE_BOOTSTRAP_STATUS:-not_requested}" \
+    "${RELEASE_BOOTSTRAP_CONFIG_PATH:-}" \
+    "${RELEASE_BOOTSTRAP_WORKFLOW_PATH:-}" \
+    "${RELEASE_STATUS:-not_configured}" \
+    "${RELEASE_WORKFLOW:-}" \
+    "${RELEASE_RUN_ID:-}" \
+    "${RELEASE_URL:-}"
 }
 
 ensure_local_branch() {
@@ -133,6 +148,33 @@ run_verify() {
     return $?
   fi
   bash "${SCRIPT_DIR}/verify_repo.sh"
+}
+
+ensure_release_assets() {
+  local bootstrap_output
+
+  if ! bootstrap_output="$(run_python "${SCRIPT_DIR}/bootstrap_release_assets.py" --repo-root .)"; then
+    RELEASE_BOOTSTRAP_STATUS="failed"
+    return 1
+  fi
+
+  RELEASE_BOOTSTRAP_STATUS="$(printf '%s\n' "$bootstrap_output" | awk -F= '$1=="release_bootstrap"{print $2}')"
+  RELEASE_BOOTSTRAP_CONFIG_PATH="$(printf '%s\n' "$bootstrap_output" | awk -F= '$1=="config_path"{print $2}')"
+  RELEASE_BOOTSTRAP_WORKFLOW_PATH="$(printf '%s\n' "$bootstrap_output" | awk -F= '$1=="workflow_path"{print $2}')"
+}
+
+trigger_release_after_merge() {
+  local release_output
+
+  if ! release_output="$(run_python "${SCRIPT_DIR}/github_ops.py" dispatch-release --ref "$BASE_BRANCH")"; then
+    RELEASE_STATUS="failed"
+    return 1
+  fi
+
+  RELEASE_STATUS="$(run_python -c 'import json,sys; payload=json.load(sys.stdin); print("triggered" if payload.get("dispatched") else "not_configured")' <<<"$release_output")"
+  RELEASE_WORKFLOW="$(run_python -c 'import json,sys; payload=json.load(sys.stdin); print(payload.get("workflow", ""))' <<<"$release_output")"
+  RELEASE_RUN_ID="$(run_python -c 'import json,sys; payload=json.load(sys.stdin); run=payload.get("run") or {}; print(run.get("id", ""))' <<<"$release_output")"
+  RELEASE_URL="$(run_python -c 'import json,sys; payload=json.load(sys.stdin); run=payload.get("run") or {}; print(run.get("html_url", ""))' <<<"$release_output")"
 }
 
 collect_conflicted_paths() {
@@ -334,6 +376,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --confirmed)
       CONFIRMED=1; shift ;;
+    --with-release)
+      WITH_RELEASE=1; shift ;;
     --base)
       BASE_BRANCH="$2"; shift 2 ;;
     --prefix)
@@ -449,6 +493,13 @@ if [[ -z "$(git status --porcelain)" ]]; then
   git_network pull --ff-only "$REMOTE" "$BASE_BRANCH" >/dev/null
 fi
 git switch -c "$FEATURE_BRANCH" >/dev/null
+
+if [[ "$WITH_RELEASE" -eq 1 ]]; then
+  if ! ensure_release_assets; then
+    summary
+    exit 1
+  fi
+fi
 
 dirty_changes=0
 if [[ -n "$(git status --porcelain)" ]]; then
@@ -586,5 +637,9 @@ if ! git_network push "$REMOTE" "$BASE_BRANCH" >/dev/null; then
   exit 1
 fi
 MERGE_STATUS="done"
+if ! trigger_release_after_merge; then
+  summary
+  exit 1
+fi
 summary
 exit 0
