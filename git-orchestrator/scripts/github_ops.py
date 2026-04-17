@@ -3,7 +3,11 @@ import argparse
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tarfile
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -37,17 +41,22 @@ def load_diagnose_module():
     return module
 
 
-def infer_repo_from_git_remote() -> Tuple[Optional[str], Optional[str]]:
+def infer_remote_url(remote: str = "origin") -> Optional[str]:
     try:
-        import subprocess
         result = subprocess.run(
-            ["git", "remote", "get-url", "origin"],
+            ["git", "remote", "get-url", remote],
             check=True,
             capture_output=True,
             text=True,
         )
-        url = result.stdout.strip()
     except Exception:
+        return None
+    return result.stdout.strip() or None
+
+
+def infer_repo_from_git_remote() -> Tuple[Optional[str], Optional[str]]:
+    url = infer_remote_url("origin")
+    if not url:
         return None, None
 
     patterns = [
@@ -59,6 +68,56 @@ def infer_repo_from_git_remote() -> Tuple[Optional[str], Optional[str]]:
         if m:
             return m.group("owner"), m.group("repo")
     return None, None
+
+
+def parse_git_credential_password(remote_url: Optional[str]) -> Optional[str]:
+    if not remote_url:
+        return None
+    parsed = urllib.parse.urlparse(remote_url)
+    if parsed.scheme != "https" or parsed.hostname != "github.com":
+        return None
+
+    try:
+        result = subprocess.run(
+            ["git", "credential", "fill"],
+            input=f"url={remote_url}\n\n",
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return None
+
+    for line in result.stdout.splitlines():
+        if line.startswith("password="):
+            password = line.split("=", 1)[1].strip()
+            if password:
+                return password
+    return None
+
+
+def candidate_github_tokens(remote_url: Optional[str]) -> list[str]:
+    candidates: list[str] = []
+    preferred = get_env("CLAW_GITHUB_TOKEN")
+    if preferred:
+        candidates.append(preferred)
+    credential_password = parse_git_credential_password(remote_url)
+    if credential_password and credential_password not in candidates:
+        candidates.append(credential_password)
+    return candidates
+
+
+def format_api_error(payload: dict) -> str:
+    try:
+        return json.dumps(payload, sort_keys=True)
+    except TypeError:
+        return str(payload)
+
+
+def as_bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def ensure_auth_ready_for_flow() -> None:
@@ -82,13 +141,20 @@ class GitHubClient:
         self.owner = owner or env_owner or inferred_owner
         self.repo = repo or env_repo or inferred_repo
         self.api_url = (api_url or os.getenv("GITHUB_API_URL") or "https://api.github.com").rstrip("/")
-        self.token = get_env("CLAW_GITHUB_TOKEN")
+        self.remote_url = infer_remote_url("origin")
+        self._repo_metadata: Optional[dict] = None
         if not self.owner or not self.repo:
             raise SystemExit("Missing repository coordinates. Set --owner/--repo, or GITHUB_OWNER/GITHUB_REPO, or configure origin remote.")
-        if not self.token:
-            raise SystemExit("Missing CLAW_GITHUB_TOKEN. Export it or set skills/.env.")
+        self.token = self._resolve_token()
 
-    def request(self, method: str, path: str, body: Optional[dict] = None, query: Optional[dict] = None) -> dict:
+    def _request_with_token(
+        self,
+        method: str,
+        path: str,
+        body: Optional[dict] = None,
+        query: Optional[dict] = None,
+        token: Optional[str] = None,
+    ) -> tuple[int, dict]:
         url = f"{self.api_url}{path}"
         if query:
             query_string = urllib.parse.urlencode({k: v for k, v in query.items() if v is not None})
@@ -98,10 +164,12 @@ class GitHubClient:
         data = None
         headers = {
             "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {self.token}",
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "git-orchestrator",
         }
+        auth_token = token or self.token
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
@@ -110,14 +178,159 @@ class GitHubClient:
         try:
             with urllib.request.urlopen(request) as response:
                 raw = response.read().decode("utf-8")
-                return json.loads(raw) if raw else {}
+                payload = json.loads(raw) if raw else {}
+                return response.status, payload
         except urllib.error.HTTPError as exc:
-            payload = exc.read().decode("utf-8", errors="replace")
-            eprint(f"GitHub API error {exc.code}: {payload}")
-            raise SystemExit(exc.code)
+            raw = exc.read().decode("utf-8", errors="replace")
+            try:
+                payload = json.loads(raw) if raw else {}
+            except json.JSONDecodeError:
+                payload = {"message": raw} if raw else {}
+            return exc.code, payload
+
+    def request(
+        self,
+        method: str,
+        path: str,
+        body: Optional[dict] = None,
+        query: Optional[dict] = None,
+        token: Optional[str] = None,
+    ) -> dict:
+        status, payload = self._request_with_token(method, path, body=body, query=query, token=token)
+        if 200 <= status < 300:
+            return payload
+        eprint(f"GitHub API error {status}: {format_api_error(payload)}")
+        raise SystemExit(status)
+
+    def request_optional(
+        self,
+        method: str,
+        path: str,
+        body: Optional[dict] = None,
+        query: Optional[dict] = None,
+        acceptable: tuple[int, ...] = (404,),
+        token: Optional[str] = None,
+    ) -> tuple[int, dict]:
+        status, payload = self._request_with_token(method, path, body=body, query=query, token=token)
+        if 200 <= status < 300 or status in acceptable:
+            return status, payload
+        eprint(f"GitHub API error {status}: {format_api_error(payload)}")
+        raise SystemExit(status)
+
+    def _token_has_repo_access(self, token: str) -> bool:
+        status, _ = self.request_optional(
+            "GET",
+            self.repo_path(),
+            acceptable=(401, 403, 404),
+            token=token,
+        )
+        return status == 200
+
+    def _resolve_token(self) -> str:
+        candidates = candidate_github_tokens(self.remote_url)
+        if not candidates:
+            raise SystemExit("Missing GitHub API token. Export CLAW_GITHUB_TOKEN or configure a git credential for origin.")
+
+        for candidate in candidates:
+            if self._token_has_repo_access(candidate):
+                return candidate
+
+        raise SystemExit(
+            f"No GitHub API token can access {self.owner}/{self.repo}. Export a repo-scoped CLAW_GITHUB_TOKEN or configure git credentials for origin."
+        )
 
     def repo_path(self) -> str:
         return f"/repos/{self.owner}/{self.repo}"
+
+    def get_repo_metadata(self) -> dict:
+        if self._repo_metadata is None:
+            self._repo_metadata = self.request("GET", self.repo_path())
+        return self._repo_metadata
+
+    def get_default_branch(self) -> Optional[str]:
+        return self.get_repo_metadata().get("default_branch")
+
+    def workflow_dispatch_status(self, workflow: str) -> dict:
+        status, payload = self.request_optional(
+            "GET",
+            f"{self.repo_path()}/actions/workflows/{workflow}",
+            acceptable=(403, 404),
+        )
+        if status == 200:
+            return {
+                "available": True,
+                "default_branch": self.get_default_branch(),
+            }
+        reason = "workflow_not_visible_on_default_branch" if status == 404 else "workflow_actions_access_forbidden"
+        return {
+            "available": False,
+            "reason": reason,
+            "default_branch": self.get_default_branch(),
+            "message": payload.get("message", ""),
+        }
+
+    def resolve_commit_sha(self, ref: str) -> str:
+        encoded_ref = urllib.parse.quote(ref, safe="")
+        payload = self.request("GET", f"{self.repo_path()}/commits/{encoded_ref}")
+        sha = payload.get("sha")
+        if not sha:
+            raise SystemExit(f"Unable to resolve commit SHA for ref '{ref}'.")
+        return sha
+
+    def create_github_release(self, ref: str, tag_name: Optional[str] = None) -> dict:
+        sha = self.resolve_commit_sha(ref)
+        resolved_tag = tag_name or f"v{datetime.now(timezone.utc):%Y.%m.%d}-{sha[:7]}"
+        status, existing = self.request_optional(
+            "GET",
+            f"{self.repo_path()}/releases/tags/{urllib.parse.quote(resolved_tag, safe='')}",
+            acceptable=(404,),
+        )
+        if status == 200:
+            return existing
+        return self.request(
+            "POST",
+            f"{self.repo_path()}/releases",
+            {
+                "tag_name": resolved_tag,
+                "target_commitish": ref,
+                "name": resolved_tag,
+                "generate_release_notes": True,
+            },
+        )
+
+    def delete_release_asset(self, asset_id: int) -> None:
+        self.request("DELETE", f"{self.repo_path()}/releases/assets/{asset_id}")
+
+    def upload_release_asset(self, release: dict, asset_path: Path) -> dict:
+        upload_url = release.get("upload_url")
+        if not upload_url:
+            raise SystemExit("GitHub release response is missing upload_url.")
+
+        filename = asset_path.name
+        for asset in release.get("assets", []):
+            if asset.get("name") == filename and asset.get("id"):
+                self.delete_release_asset(asset["id"])
+
+        upload_target = upload_url.split("{", 1)[0]
+        upload_target = f"{upload_target}?name={urllib.parse.quote(filename)}"
+        data = asset_path.read_bytes()
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/gzip",
+            "Content-Length": str(len(data)),
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "git-orchestrator",
+        }
+        request = urllib.request.Request(upload_target, data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(request) as response:
+                raw = response.read().decode("utf-8")
+                return json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as exc:
+            payload = exc.read().decode("utf-8", errors="replace")
+            eprint(f"GitHub upload error {exc.code}: {payload}")
+            raise SystemExit(exc.code)
 
 
 def print_json(data: dict):
@@ -168,6 +381,215 @@ def parse_release_platforms(value) -> list[str]:
     if isinstance(value, list):
         return [str(item).strip() for item in value if str(item).strip()]
     raise SystemExit("release.after_merge.platforms must be a string or array.")
+
+
+def normalize_release_package_settings(repo_root: Path, package: Optional[dict]) -> dict:
+    package = package or {}
+    if not isinstance(package, dict):
+        raise SystemExit("release.after_merge.package must be a JSON object when provided.")
+
+    prebuilt = package.get("prebuilt_binaries", {})
+    if prebuilt and not isinstance(prebuilt, dict):
+        raise SystemExit("release.after_merge.package.prebuilt_binaries must be a JSON object.")
+
+    normalized_prebuilt: dict[str, list[str]] = {}
+    for platform, value in prebuilt.items():
+        if isinstance(value, str):
+            items = [value]
+        elif isinstance(value, list):
+            items = [str(item).strip() for item in value if str(item).strip()]
+        else:
+            raise SystemExit("release.after_merge.package.prebuilt_binaries values must be strings or arrays.")
+        normalized_prebuilt[str(platform).strip()] = items
+
+    include_globs = package.get(
+        "include_globs",
+        [
+            "README*",
+            "LICENSE*",
+            "NOTICE*",
+            "config*.yml",
+            "config*.yaml",
+            "config/**/*.yml",
+            "config/**/*.yaml",
+            "*.example",
+            "*.env.example",
+        ],
+    )
+    if isinstance(include_globs, str):
+        include_globs = [include_globs]
+    if not isinstance(include_globs, list):
+        raise SystemExit("release.after_merge.package.include_globs must be a string or array.")
+
+    mode = str(package.get("mode", "auto")).strip().lower() or "auto"
+    if mode not in {"auto", "go", "prebuilt"}:
+        raise SystemExit("release.after_merge.package.mode must be one of: auto, go, prebuilt.")
+    if mode == "auto":
+        if normalized_prebuilt:
+            mode = "prebuilt"
+        elif (repo_root / "go.mod").is_file():
+            mode = "go"
+        else:
+            raise SystemExit(
+                "Unable to determine release packaging strategy. Configure release.after_merge.package "
+                "with prebuilt_binaries or use a Go repository."
+            )
+
+    return {
+        "mode": mode,
+        "binary_name": str(package.get("binary_name") or repo_root.name),
+        "main_package": str(package.get("main_package") or "."),
+        "arch": str(package.get("arch") or "amd64"),
+        "include_globs": [str(item).strip() for item in include_globs if str(item).strip()],
+        "prebuilt_binaries": normalized_prebuilt,
+    }
+
+
+def select_prebuilt_binary(repo_root: Path, platform: str, settings: dict) -> Path:
+    patterns = settings["prebuilt_binaries"].get(platform) or settings["prebuilt_binaries"].get("default") or []
+    if not patterns:
+        raise SystemExit(f"No prebuilt binary configured for platform '{platform}'.")
+
+    matches: list[Path] = []
+    for pattern in patterns:
+        matches.extend(path for path in repo_root.glob(pattern) if path.is_file())
+    unique_matches = sorted({path.resolve() for path in matches})
+    if not unique_matches:
+        raise SystemExit(f"No prebuilt binary matched for platform '{platform}'.")
+    if len(unique_matches) > 1:
+        raise SystemExit(
+            f"Multiple prebuilt binaries matched for platform '{platform}': "
+            + ", ".join(str(path.relative_to(repo_root)) for path in unique_matches)
+        )
+    return unique_matches[0]
+
+
+def collect_release_support_files(repo_root: Path, include_globs: list[str]) -> list[Path]:
+    matches: dict[str, Path] = {}
+    for pattern in include_globs:
+        for path in repo_root.glob(pattern):
+            if not path.is_file():
+                continue
+            matches[path.relative_to(repo_root).as_posix()] = path
+    return [matches[key] for key in sorted(matches)]
+
+
+def copy_release_support_files(repo_root: Path, staging_dir: Path, include_globs: list[str]) -> None:
+    for path in collect_release_support_files(repo_root, include_globs):
+        relative = path.relative_to(repo_root)
+        target = staging_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+
+
+def build_go_binary(repo_root: Path, staging_dir: Path, platform: str, settings: dict) -> None:
+    goos = {"linux": "linux", "macos": "darwin"}.get(platform)
+    if not goos:
+        raise SystemExit(f"Unsupported Go release platform '{platform}'.")
+    target = staging_dir / settings["binary_name"]
+    env = os.environ.copy()
+    env.update(
+        {
+            "CGO_ENABLED": env.get("CGO_ENABLED", "0"),
+            "GOOS": goos,
+            "GOARCH": settings["arch"],
+        }
+    )
+    try:
+        subprocess.run(
+            ["go", "build", "-o", str(target), settings["main_package"]],
+            cwd=repo_root,
+            check=True,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(
+            f"Go release build failed for platform '{platform}':\n{exc.stderr or exc.stdout}"
+        ) from exc
+    target.chmod(0o755)
+
+
+def prepare_release_payload(repo_root: Path, platform: str, settings: dict, staging_dir: Path) -> Path:
+    staging_dir.mkdir(parents=True, exist_ok=True)
+    if settings["mode"] == "prebuilt":
+        source = select_prebuilt_binary(repo_root, platform, settings)
+        target = staging_dir / settings["binary_name"]
+        shutil.copy2(source, target)
+        target.chmod(0o755)
+    elif settings["mode"] == "go":
+        build_go_binary(repo_root, staging_dir, platform, settings)
+    else:
+        raise SystemExit(f"Unsupported release packaging mode '{settings['mode']}'.")
+
+    copy_release_support_files(repo_root, staging_dir, settings["include_globs"])
+    return staging_dir
+
+
+def build_release_archive(staging_dir: Path, repo_name: str, version: str, platform: str, output_dir: Path) -> Path:
+    archive_path = output_dir / f"{repo_name}-{version}-{platform}.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as archive:
+        for path in sorted(staging_dir.rglob("*")):
+            if not path.exists() or path.is_dir():
+                continue
+            relative = path.relative_to(staging_dir)
+            archive.add(path, arcname=str(relative), recursive=False)
+    return archive_path
+
+
+def build_local_release_archives(repo_root: Path, version: str, platforms: list[str], package_settings: Optional[dict] = None) -> list[Path]:
+    repo_name = repo_root.name
+    if not platforms:
+        raise SystemExit("release.after_merge.platforms is required for local release packaging fallback.")
+
+    settings = normalize_release_package_settings(repo_root, package_settings)
+    output_dir = Path(tempfile.mkdtemp(prefix="git-orchestrator-release-"))
+    archives = []
+    for platform in platforms:
+        staging_dir = output_dir / f"payload-{platform}"
+        prepare_release_payload(repo_root, platform, settings, staging_dir)
+        archives.append(build_release_archive(staging_dir, repo_name, version, platform, output_dir))
+    return archives
+
+
+def build_github_release_fallback_summary(client: "GitHubClient", workflow: str, ref: str, workflow_status: dict) -> dict:
+    repo_root = find_repo_root(Path.cwd())
+    version = workflow_status["version"]
+    release = client.create_github_release(ref, tag_name=version)
+    archives = build_local_release_archives(
+        repo_root,
+        version,
+        workflow_status["platforms"],
+        package_settings=workflow_status.get("package_settings"),
+    )
+    uploaded_assets = [client.upload_release_asset(release, path) for path in archives]
+    return {
+        "enabled": True,
+        "dispatched": True,
+        "workflow": workflow,
+        "ref": ref,
+        "mode": "github_release_fallback",
+        "reason": workflow_status.get("reason", "workflow_unavailable"),
+        "default_branch": workflow_status.get("default_branch"),
+        "message": workflow_status.get("message", ""),
+        "run": None,
+        "release": {
+            "id": release.get("id"),
+            "tag_name": release.get("tag_name"),
+            "html_url": release.get("html_url"),
+            "target_commitish": release.get("target_commitish"),
+        },
+        "assets": [
+            {
+                "name": asset.get("name"),
+                "size": asset.get("size"),
+                "browser_download_url": asset.get("browser_download_url"),
+            }
+            for asset in uploaded_assets
+        ],
+        "release_url": release.get("html_url"),
+    }
 
 
 def build_dispatch_summary(client: "GitHubClient", workflow: str, ref: str, inputs: dict, wait: bool, timeout: int, interval: int) -> dict:
@@ -269,6 +691,7 @@ def resolve_release_dispatch(config_path: str, ref: Optional[str], extra_inputs:
         "workflow": workflow,
         "ref": ref or release_cfg.get("ref") or workflow_cfg.get("default_ref") or os.getenv("GITHUB_BASE_BRANCH") or "main",
         "inputs": merged_inputs,
+        "package_settings": release_cfg.get("package", {}),
         "wait": bool(release_cfg.get("wait", False)),
         "timeout": int(release_cfg.get("timeout", 1800)),
         "interval": int(release_cfg.get("interval", 15)),
@@ -440,6 +863,35 @@ def dispatch_release(client: GitHubClient, args) -> dict:
     if not release.get("enabled"):
         return release
 
+    workflow_status = client.workflow_dispatch_status(release["workflow"])
+    if not workflow_status.get("available"):
+        release_inputs = release.get("inputs", {})
+        version = release_inputs.get("version")
+        if not version:
+            version = f"v{datetime.now(timezone.utc):%Y.%m.%d}-{client.resolve_commit_sha(release['ref'])[:7]}"
+        if not as_bool(release_inputs.get("publish", "true")):
+            return {
+                "enabled": True,
+                "dispatched": False,
+                "workflow": release["workflow"],
+                "ref": release["ref"],
+                "mode": "github_release_fallback",
+                "reason": "publish_disabled",
+                "default_branch": workflow_status.get("default_branch"),
+                "message": "Release publish is disabled by inputs.publish=false.",
+            }
+        return build_github_release_fallback_summary(
+            client,
+            workflow=release["workflow"],
+            ref=release["ref"],
+            workflow_status={
+                **workflow_status,
+                "version": version,
+                "platforms": parse_release_platforms(release_inputs.get("platforms")),
+                "package_settings": release.get("package_settings", {}),
+            },
+        )
+
     wait = args.wait or release["wait"]
     timeout = args.timeout if args.timeout is not None else release["timeout"]
     interval = args.interval if args.interval is not None else release["interval"]
@@ -588,6 +1040,15 @@ def build_parser():
 def main():
     parser = build_parser()
     args = parser.parse_args()
+    if args.command == "dispatch-release":
+        summary = resolve_release_dispatch(
+            config_path=args.config,
+            ref=args.ref,
+            extra_inputs=parse_inputs(args.input),
+        )
+        if not summary.get("enabled"):
+            print_json(summary)
+            return
     ensure_auth_ready_for_flow()
     client = GitHubClient(owner=args.owner, repo=args.repo, api_url=args.api_url)
     args.func(client, args)

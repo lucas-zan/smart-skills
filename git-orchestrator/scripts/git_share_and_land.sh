@@ -16,7 +16,9 @@ VERIFY_CMD_ARG=""
 MERGE_MODE="merge"
 REQUIREMENTS=()
 DESIGNS=()
+TEST_DOCS=()
 TESTS=()
+TODOS=()
 POST_SHARE_CMD="${POST_SHARE_CMD:-}"
 GIT_AUTH_ARGS=()
 CONFLICT_PATHS=()
@@ -45,7 +47,7 @@ run_python() {
 
 usage() {
   cat <<'USAGE'
-Usage: git_share_and_land.sh --confirmed --slug <slug> [--with-release] [--base <branch>] [--prefix <prefix>] [--subject <message>] [--body <details>] [--context <summary>] [--remote <remote>] [--verify-cmd <cmd>] [--requirement <path>] [--design <path>] [--test <path>] [--no-add-all] [--merge-mode <merge|ff-only>]
+Usage: git_share_and_land.sh --confirmed --slug <slug> [--with-release] [--base <branch>] [--prefix <prefix>] [--subject <message>] [--body <details>] [--context <summary>] [--remote <remote>] [--verify-cmd <cmd>] [--requirement <path>] [--design <path>] [--test-doc <path>] [--test <path>] [--todo <path>] [--no-add-all] [--merge-mode <merge|ff-only>]
 USAGE
 }
 
@@ -130,6 +132,44 @@ build_basis_args() {
     for item in "${TESTS[@]}"; do
       BASIS_ARGS+=(--test "$item")
     done
+  fi
+}
+
+build_readiness_args() {
+  READINESS_ARGS=()
+  if ((${#REQUIREMENTS[@]})); then
+    for item in "${REQUIREMENTS[@]}"; do
+      READINESS_ARGS+=(--requirement "$item")
+    done
+  fi
+  if ((${#DESIGNS[@]})); then
+    for item in "${DESIGNS[@]}"; do
+      READINESS_ARGS+=(--design "$item")
+    done
+  fi
+  if ((${#TEST_DOCS[@]})); then
+    for item in "${TEST_DOCS[@]}"; do
+      READINESS_ARGS+=(--test-doc "$item")
+    done
+  fi
+  if ((${#TESTS[@]})); then
+    for item in "${TESTS[@]}"; do
+      READINESS_ARGS+=(--test "$item")
+    done
+  fi
+  if ((${#TODOS[@]})); then
+    for item in "${TODOS[@]}"; do
+      READINESS_ARGS+=(--todo "$item")
+    done
+  fi
+}
+
+run_readiness_check() {
+  build_readiness_args
+  if [[ "${#READINESS_ARGS[@]}" -gt 0 ]]; then
+    run_python "${SCRIPT_DIR}/validate_submission_readiness.py" --against-ref "${REMOTE}/${BASE_BRANCH}" "${READINESS_ARGS[@]}"
+  else
+    run_python "${SCRIPT_DIR}/validate_submission_readiness.py" --against-ref "${REMOTE}/${BASE_BRANCH}"
   fi
 }
 
@@ -398,8 +438,12 @@ while [[ $# -gt 0 ]]; do
       REQUIREMENTS+=("$2"); shift 2 ;;
     --design)
       DESIGNS+=("$2"); shift 2 ;;
+    --test-doc)
+      TEST_DOCS+=("$2"); shift 2 ;;
     --test)
       TESTS+=("$2"); shift 2 ;;
+    --todo)
+      TODOS+=("$2"); shift 2 ;;
     --no-add-all)
       ADD_ALL=0; shift ;;
     --merge-mode)
@@ -512,6 +556,7 @@ if [[ "$dirty_changes" -eq 0 && "$ahead_count" == "0" ]]; then
   exit 1
 fi
 
+run_readiness_check
 run_basis_check
 
 if [[ "$dirty_changes" -eq 1 ]]; then
@@ -538,6 +583,16 @@ if [[ "$dirty_changes" -eq 1 ]]; then
   if [[ "${#TESTS[@]}" -gt 0 ]]; then
     for item in "${TESTS[@]}"; do
       commit_args+=(--test "$item")
+    done
+  fi
+  if [[ "${#TEST_DOCS[@]}" -gt 0 ]]; then
+    for item in "${TEST_DOCS[@]}"; do
+      commit_args+=(--test-doc "$item")
+    done
+  fi
+  if [[ "${#TODOS[@]}" -gt 0 ]]; then
+    for item in "${TODOS[@]}"; do
+      commit_args+=(--todo "$item")
     done
   fi
   if [[ "$ADD_ALL" -eq 0 ]]; then

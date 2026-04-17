@@ -129,10 +129,57 @@ def resolve_release_settings(config: dict[str, Any]) -> dict[str, Any]:
         "allowed_inputs": allowed_inputs,
         "required_inputs": required_inputs,
         "default_inputs": merged_defaults,
+        "package": release_cfg.get("package", {}),
     }
 
 
-def build_workflow_yaml(settings: dict[str, Any]) -> str:
+def resolve_package_settings(repo_root: Path, package: dict[str, Any]) -> dict[str, str | list[str]]:
+    package = package or {}
+    mode = str(package.get("mode", "auto")).strip().lower() or "auto"
+    if mode not in {"auto", "go"}:
+        raise SystemExit(
+            "Release workflow scaffolding currently supports Go binary packaging only. "
+            "Set release.after_merge.package.mode to 'go' or use a Go repository."
+        )
+
+    if not (repo_root / "go.mod").is_file() and mode == "auto":
+        raise SystemExit(
+            "Release workflow scaffolding could not auto-detect a Go repository. "
+            "Set release.after_merge.package.mode='go' and configure main_package/binary_name."
+        )
+
+    include_globs = package.get(
+        "include_globs",
+        [
+            "README*",
+            "LICENSE*",
+            "NOTICE*",
+            "config*.yml",
+            "config*.yaml",
+            "config/**/*.yml",
+            "config/**/*.yaml",
+            "*.example",
+            "*.env.example",
+        ],
+    )
+    if isinstance(include_globs, str):
+        include_globs = [include_globs]
+    if not isinstance(include_globs, list):
+        raise SystemExit("release.after_merge.package.include_globs must be a string or array.")
+
+    return {
+        "binary_name": str(package.get("binary_name") or repo_root.name),
+        "main_package": str(package.get("main_package") or "."),
+        "arch": str(package.get("arch") or "amd64"),
+        "include_globs": [str(item).strip() for item in include_globs if str(item).strip()],
+    }
+
+
+def build_include_lines(patterns: list[str]) -> str:
+    return "\n".join(f"          {yaml_quote(pattern)}" for pattern in patterns)
+
+
+def build_workflow_yaml(repo_root: Path, settings: dict[str, Any]) -> str:
     platform_input = settings["platform_input"]
     dispatch_inputs = build_dispatch_inputs(
         allowed_inputs=settings["allowed_inputs"],
@@ -141,6 +188,8 @@ def build_workflow_yaml(settings: dict[str, Any]) -> str:
         platform_input=platform_input,
     )
     package_if = "${{ contains(format(',{0},', github.event.inputs." + platform_input + "), format(',{0},', matrix.platform)) }}"
+    package_settings = resolve_package_settings(repo_root, settings.get("package", {}))
+    include_lines = build_include_lines(package_settings["include_globs"])
 
     return f"""name: Release
 
@@ -182,12 +231,38 @@ jobs:
     runs-on: ${{{{ matrix.runner }}}}
     steps:
       - uses: actions/checkout@v4
-      - name: Build release archive
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build release payload
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p dist
+          mkdir -p "dist/package"
+          case "${{{{ matrix.platform }}}}" in
+            linux) GOOS_VALUE=linux ;;
+            macos) GOOS_VALUE=darwin ;;
+            *) echo "Unsupported platform: ${{{{ matrix.platform }}}}" >&2; exit 1 ;;
+          esac
+          GOOS="$GOOS_VALUE" GOARCH="{package_settings["arch"]}" CGO_ENABLED=0 go build -o "dist/package/{package_settings["binary_name"]}" "{package_settings["main_package"]}"
+          while IFS= read -r pattern; do
+            [ -n "$pattern" ] || continue
+            for match in $pattern; do
+              [ -e "$match" ] || continue
+              if [ -d "$match" ]; then
+                mkdir -p "dist/package/$match"
+                cp -R "$match"/. "dist/package/$match/"
+              else
+                mkdir -p "dist/package/$(dirname "$match")"
+                cp "$match" "dist/package/$match"
+              fi
+            done
+          done <<'EOF'
+{include_lines}
+EOF
           archive="${{{{ github.event.repository.name }}}}-${{{{ needs.prepare.outputs.version }}}}-${{{{ matrix.platform }}}}.tar.gz"
-          tar --exclude=.git --exclude=.github --exclude=dist -czf "dist/${{archive}}" .
+          tar -czf "dist/${{archive}}" -C "dist/package" .
       - name: Upload packaged asset
         uses: actions/upload-artifact@v4
         with:
@@ -237,7 +312,7 @@ def main() -> int:
         raise SystemExit(f"Workflow file already exists: {output_path}. Pass --force to overwrite.")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(build_workflow_yaml(settings))
+    output_path.write_text(build_workflow_yaml(repo_root, settings))
     print(f"created={output_path.relative_to(repo_root)}")
     return 0
 

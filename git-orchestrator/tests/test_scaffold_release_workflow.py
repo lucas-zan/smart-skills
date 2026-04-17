@@ -22,6 +22,7 @@ class ScaffoldReleaseWorkflowTests(unittest.TestCase):
     def test_generates_release_workflow_from_repo_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
+            (repo / "go.mod").write_text("module example.com/demo\n\ngo 1.24\n")
             config = repo / "git-orchestrator" / ".git-orchestrator.json"
             config.parent.mkdir(parents=True)
             config.write_text(
@@ -60,12 +61,16 @@ class ScaffoldReleaseWorkflowTests(unittest.TestCase):
             self.assertIn("runs-on: ${{ matrix.runner }}", content)
             self.assertIn("macos-latest", content)
             self.assertIn("ubuntu-latest", content)
+            self.assertIn("actions/setup-go@v5", content)
+            self.assertIn("go build -o \"dist/package/", content)
+            self.assertIn("tar -czf \"dist/${archive}\" -C \"dist/package\" .", content)
             self.assertIn("gh release create", content)
             self.assertIn("created=.github/workflows/release.yml", result.stdout)
 
     def test_refuses_to_overwrite_existing_workflow_without_force(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
+            (repo / "go.mod").write_text("module example.com/demo\n\ngo 1.24\n")
             (repo / ".github" / "workflows").mkdir(parents=True)
             workflow = repo / ".github" / "workflows" / "release.yml"
             workflow.write_text("name: keep-me\n")

@@ -31,6 +31,37 @@ class RepoPolicyTests(unittest.TestCase):
         self.assertEqual(share_and_land["blocked_conflict_paths"], [])
         self.assertEqual(share_and_land["max_conflict_resolution_attempts"], 3)
 
+        evidence = policy["evidence"]
+        self.assertTrue(evidence["pre_commit_checks_enabled"])
+        self.assertTrue(evidence["require_test_docs"])
+        self.assertTrue(evidence["require_todo"])
+        self.assertIn("docs/tests/**/*.md", evidence["test_doc_globs"])
+        self.assertIn("docs/**/*todo*.md", evidence["todo_globs"])
+
+    def test_new_pre_commit_checks_flag_overrides_legacy_setting(self) -> None:
+        module = load_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / ".git-orchestrator.json").write_text(
+                json.dumps(
+                    {
+                        "policy": {
+                            "evidence": {
+                                "enforce_before_commit": True,
+                                "pre_commit_checks_enabled": False,
+                            }
+                        }
+                    }
+                )
+            )
+
+            policy = module.load_policy(repo_root)
+
+        evidence = policy["evidence"]
+        self.assertTrue(evidence["enforce_before_commit"])
+        self.assertFalse(evidence["pre_commit_checks_enabled"])
+
     def test_default_config_path_falls_back_to_skill_directory(self) -> None:
         module = load_module()
 

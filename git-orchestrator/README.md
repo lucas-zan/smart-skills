@@ -48,6 +48,7 @@
 
 如果 repo policy、远端权限或验证命令不满足，skill 应该停止，而不是继续冒险提交。
 这个 skill 的自动补齐能力只用于 release 自动化文件，不应该拿来修业务代码。
+如果你明确要关闭提交前 evidence / readiness 检查，可以在 repo policy 中设置 `policy.evidence.pre_commit_checks_enabled: false`。
 
 ## 目录结构
 
@@ -205,6 +206,7 @@ git remote set-url origin https://github.com/<owner>/<repo>.git
     },
     "evidence": {
       "enforce_before_commit": true,
+      "pre_commit_checks_enabled": true,
       "require_requirements": true,
       "require_design": true,
       "require_tests": true
@@ -234,6 +236,11 @@ git remote set-url origin https://github.com/<owner>/<repo>.git
 - `max_conflict_resolution_attempts`: 单次流程里最多尝试多少次自动解冲突
 
 推荐默认保持关闭，只在明确知道风险边界时开启。对于 migration、权限、安全、发布配置这类文件，更适合放进 `blocked_conflict_paths`。
+
+提交前检查相关字段说明：
+
+- `pre_commit_checks_enabled`: 是否执行提交前 readiness 和 change-basis 检查。设为 `false` 时，commit/share 流程会跳过这些 gate
+- `enforce_before_commit`: 旧字段，仍兼容；如果同时配置了新旧字段，以 `pre_commit_checks_enabled` 为准
 
 ## 快速使用
 

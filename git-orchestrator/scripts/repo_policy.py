@@ -18,9 +18,12 @@ DEFAULT_POLICY = {
     "verify": {},
     "evidence": {
         "enforce_before_commit": True,
+        "pre_commit_checks_enabled": True,
         "require_requirements": True,
         "require_design": True,
         "require_tests": True,
+        "require_test_docs": True,
+        "require_todo": True,
         "requirement_globs": [
             "docs/requirements/**/*.md",
             "docs/prd/**/*.md",
@@ -42,6 +45,22 @@ DEFAULT_POLICY = {
             "**/*.spec.tsx",
             "**/*.test.tsx",
         ],
+        "test_doc_globs": [
+            "docs/tests/*.md",
+            "docs/tests/**/*.md",
+            "docs/test/*.md",
+            "docs/test/**/*.md",
+            "docs/**/*test-case*.md",
+            "docs/**/*test-plan*.md",
+            "docs/**/*test*.md",
+        ],
+        "todo_globs": [
+            "docs/todo/*.md",
+            "docs/todo/**/*.md",
+            "docs/**/*todo*.md",
+            "TODO.md",
+            "TODO*.md",
+        ],
     },
     "share_and_land": {
         "allow_direct": True,
@@ -56,6 +75,12 @@ DEFAULT_POLICY = {
         "max_conflict_resolution_attempts": 3,
     },
 }
+
+
+def pre_commit_checks_enabled(evidence: Dict[str, Any]) -> bool:
+    if "pre_commit_checks_enabled" in evidence:
+        return bool(evidence["pre_commit_checks_enabled"])
+    return bool(evidence.get("enforce_before_commit", True))
 
 
 def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:

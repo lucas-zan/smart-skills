@@ -8,7 +8,9 @@ PUSH=1
 REMOTE="origin"
 REQUIREMENTS=()
 DESIGNS=()
+TEST_DOCS=()
 TESTS=()
+TODOS=()
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GIT_AUTH_ARGS=()
 
@@ -46,7 +48,7 @@ append_basis_args() {
 
 usage() {
   cat <<'USAGE'
-Usage: git_commit_and_push.sh --subject <message> [--body <details>] [--requirement <path>] [--design <path>] [--test <path>] [--no-add-all] [--no-push] [--remote <remote>]
+Usage: git_commit_and_push.sh --subject <message> [--body <details>] [--requirement <path>] [--design <path>] [--test-doc <path>] [--test <path>] [--todo <path>] [--no-add-all] [--no-push] [--remote <remote>]
 USAGE
 }
 
@@ -78,8 +80,12 @@ while [[ $# -gt 0 ]]; do
       REQUIREMENTS+=("$2"); shift 2 ;;
     --design)
       DESIGNS+=("$2"); shift 2 ;;
+    --test-doc)
+      TEST_DOCS+=("$2"); shift 2 ;;
     --test)
       TESTS+=("$2"); shift 2 ;;
+    --todo)
+      TODOS+=("$2"); shift 2 ;;
     --no-add-all)
       ADD_ALL=0; shift ;;
     --no-push)
@@ -112,6 +118,38 @@ if [[ -z "$current_branch" ]]; then
 fi
 
 if [[ "$ADD_ALL" -eq 1 ]]; then
+  readiness_args=()
+  if ((${#REQUIREMENTS[@]})); then
+    for item in "${REQUIREMENTS[@]}"; do
+      readiness_args+=(--requirement "$item")
+    done
+  fi
+  if ((${#DESIGNS[@]})); then
+    for item in "${DESIGNS[@]}"; do
+      readiness_args+=(--design "$item")
+    done
+  fi
+  if ((${#TEST_DOCS[@]})); then
+    for item in "${TEST_DOCS[@]}"; do
+      readiness_args+=(--test-doc "$item")
+    done
+  fi
+  if ((${#TESTS[@]})); then
+    for item in "${TESTS[@]}"; do
+      readiness_args+=(--test "$item")
+    done
+  fi
+  if ((${#TODOS[@]})); then
+    for item in "${TODOS[@]}"; do
+      readiness_args+=(--todo "$item")
+    done
+  fi
+  if ((${#readiness_args[@]})); then
+    run_python "${SCRIPT_DIR}/validate_submission_readiness.py" "${readiness_args[@]}"
+  else
+    run_python "${SCRIPT_DIR}/validate_submission_readiness.py"
+  fi
+
   basis_args=()
   append_basis_args REQUIREMENTS --requirement
   append_basis_args DESIGNS --design
@@ -131,6 +169,38 @@ else
     echo "No staged changes to commit. Stage files first, or omit --no-add-all." >&2
     exit 1
   fi
+  readiness_args=()
+  if ((${#REQUIREMENTS[@]})); then
+    for item in "${REQUIREMENTS[@]}"; do
+      readiness_args+=(--requirement "$item")
+    done
+  fi
+  if ((${#DESIGNS[@]})); then
+    for item in "${DESIGNS[@]}"; do
+      readiness_args+=(--design "$item")
+    done
+  fi
+  if ((${#TEST_DOCS[@]})); then
+    for item in "${TEST_DOCS[@]}"; do
+      readiness_args+=(--test-doc "$item")
+    done
+  fi
+  if ((${#TESTS[@]})); then
+    for item in "${TESTS[@]}"; do
+      readiness_args+=(--test "$item")
+    done
+  fi
+  if ((${#TODOS[@]})); then
+    for item in "${TODOS[@]}"; do
+      readiness_args+=(--todo "$item")
+    done
+  fi
+  if ((${#readiness_args[@]})); then
+    run_python "${SCRIPT_DIR}/validate_submission_readiness.py" "${readiness_args[@]}"
+  else
+    run_python "${SCRIPT_DIR}/validate_submission_readiness.py"
+  fi
+
   basis_args=()
   append_basis_args REQUIREMENTS --requirement
   append_basis_args DESIGNS --design

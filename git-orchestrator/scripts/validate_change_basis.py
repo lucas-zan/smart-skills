@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Iterable, List
 
-from repo_policy import find_repo_root, load_policy
+from repo_policy import find_repo_root, load_policy, pre_commit_checks_enabled
 
 
 def run(cmd: List[str], cwd: Path) -> str:
@@ -88,7 +88,7 @@ def main() -> int:
     policy = load_policy(repo_root, args.config)
     evidence = policy["evidence"]
 
-    if not evidence.get("enforce_before_commit", True):
+    if not pre_commit_checks_enabled(evidence):
         print("requirements=skipped")
         print("design=skipped")
         print("tests=skipped")

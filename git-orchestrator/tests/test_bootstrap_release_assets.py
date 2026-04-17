@@ -22,6 +22,7 @@ class BootstrapReleaseAssetsTests(unittest.TestCase):
     def test_creates_repo_root_release_assets_from_skill_defaults(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
+            (repo / "go.mod").write_text("module example.com/demo\n\ngo 1.24\n")
             result = self.run_script(repo)
 
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -39,6 +40,7 @@ class BootstrapReleaseAssetsTests(unittest.TestCase):
     def test_preserves_existing_repo_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
+            (repo / "go.mod").write_text("module example.com/demo\n\ngo 1.24\n")
             (repo / ".github" / "workflows").mkdir(parents=True)
             (repo / ".git-orchestrator.json").write_text('{"release":{"after_merge":{"enabled":true,"workflow":"release.yml"}}}\n')
             (repo / ".github" / "workflows" / "release.yml").write_text("name: existing\n")

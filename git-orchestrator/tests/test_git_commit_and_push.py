@@ -1,3 +1,4 @@
+import os
 import subprocess
 import tempfile
 import unittest
@@ -25,7 +26,9 @@ class GitCommitAndPushTests(unittest.TestCase):
             '      "enforce_before_commit": true,\n'
             '      "require_requirements": true,\n'
             '      "require_design": true,\n'
-            '      "require_tests": true\n'
+            '      "require_tests": true,\n'
+            '      "require_test_docs": true,\n'
+            '      "require_todo": true\n'
             "    }\n"
             "  }\n"
             "}\n"
@@ -45,12 +48,14 @@ class GitCommitAndPushTests(unittest.TestCase):
         return result.stdout.strip()
 
     def script(self, *args: str) -> subprocess.CompletedProcess[str]:
+        env = dict(os.environ, UV_CACHE_DIR=str(self.repo / ".uv-cache"))
         return subprocess.run(
             ["bash", str(SCRIPT), *args],
             cwd=self.repo,
             check=False,
             capture_output=True,
             text=True,
+            env=env,
         )
 
     def test_no_add_all_requires_staged_changes(self) -> None:
@@ -66,6 +71,10 @@ class GitCommitAndPushTests(unittest.TestCase):
         (self.repo / "docs" / "requirements" / "feature.md").write_text("# req\n")
         (self.repo / "docs" / "design").mkdir(parents=True)
         (self.repo / "docs" / "design" / "feature.md").write_text("# design\n")
+        (self.repo / "docs" / "tests").mkdir(parents=True)
+        (self.repo / "docs" / "tests" / "feature.md").write_text("# test cases\n")
+        (self.repo / "docs" / "todo").mkdir(parents=True)
+        (self.repo / "docs" / "todo" / "feature.md").write_text("- [x] done\n")
         (self.repo / "tests").mkdir()
         (self.repo / "tests" / "test_feature.py").write_text("def test_feature():\n    assert True\n")
         (self.repo / "a.txt").write_text("two\n")
@@ -80,8 +89,12 @@ class GitCommitAndPushTests(unittest.TestCase):
             "docs/requirements/feature.md",
             "--design",
             "docs/design/feature.md",
+            "--test-doc",
+            "docs/tests/feature.md",
             "--test",
             "tests/test_feature.py",
+            "--todo",
+            "docs/todo/feature.md",
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -93,13 +106,17 @@ class GitCommitAndPushTests(unittest.TestCase):
         result = self.script("--subject", "test(repo): demo", "--no-push")
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Missing required change basis", result.stderr)
+        self.assertIn("Submission readiness check failed", result.stderr)
 
     def test_commit_passes_with_requirement_design_and_test_evidence(self) -> None:
         (self.repo / "docs" / "requirements").mkdir(parents=True)
         (self.repo / "docs" / "requirements" / "feature.md").write_text("# req\n")
         (self.repo / "docs" / "design").mkdir(parents=True)
         (self.repo / "docs" / "design" / "feature.md").write_text("# design\n")
+        (self.repo / "docs" / "tests").mkdir(parents=True)
+        (self.repo / "docs" / "tests" / "feature.md").write_text("# test cases\n")
+        (self.repo / "docs" / "todo").mkdir(parents=True)
+        (self.repo / "docs" / "todo" / "feature.md").write_text("- [x] done\n")
         (self.repo / "tests").mkdir()
         (self.repo / "tests" / "test_feature.py").write_text("def test_feature():\n    assert True\n")
         (self.repo / "a.txt").write_text("two\n")
@@ -112,12 +129,72 @@ class GitCommitAndPushTests(unittest.TestCase):
             "docs/requirements/feature.md",
             "--design",
             "docs/design/feature.md",
+            "--test-doc",
+            "docs/tests/feature.md",
             "--test",
             "tests/test_feature.py",
+            "--todo",
+            "docs/todo/feature.md",
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.git("log", "-1", "--pretty=%s"), "test(repo): demo")
+
+    def test_commit_passes_when_pre_commit_checks_are_disabled_in_config(self) -> None:
+        (self.repo / ".git-orchestrator.json").write_text(
+            "{\n"
+            '  "policy": {\n'
+            '    "evidence": {\n'
+            '      "enforce_before_commit": true,\n'
+            '      "pre_commit_checks_enabled": false,\n'
+            '      "require_requirements": true,\n'
+            '      "require_design": true,\n'
+            '      "require_tests": true,\n'
+            '      "require_test_docs": true,\n'
+            '      "require_todo": true\n'
+            "    }\n"
+            "  }\n"
+            "}\n"
+        )
+        (self.repo / "a.txt").write_text("two\n")
+
+        result = self.script("--subject", "test(repo): demo", "--no-push")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.git("log", "-1", "--pretty=%s"), "test(repo): demo")
+
+    def test_commit_is_blocked_when_todo_is_not_completed(self) -> None:
+        (self.repo / "docs" / "requirements").mkdir(parents=True)
+        (self.repo / "docs" / "requirements" / "feature.md").write_text("# req\n")
+        (self.repo / "docs" / "design").mkdir(parents=True)
+        (self.repo / "docs" / "design" / "feature.md").write_text("# design\n")
+        (self.repo / "docs" / "tests").mkdir(parents=True)
+        (self.repo / "docs" / "tests" / "feature.md").write_text("# test cases\n")
+        (self.repo / "docs" / "todo").mkdir(parents=True)
+        (self.repo / "docs" / "todo" / "feature.md").write_text("- [x] done\n- [ ] pending\n")
+        (self.repo / "tests").mkdir()
+        (self.repo / "tests" / "test_feature.py").write_text("def test_feature():\n    assert True\n")
+        (self.repo / "a.txt").write_text("two\n")
+
+        result = self.script(
+            "--subject",
+            "test(repo): demo",
+            "--no-push",
+            "--requirement",
+            "docs/requirements/feature.md",
+            "--design",
+            "docs/design/feature.md",
+            "--test-doc",
+            "docs/tests/feature.md",
+            "--test",
+            "tests/test_feature.py",
+            "--todo",
+            "docs/todo/feature.md",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Submission readiness check failed", result.stderr)
+        self.assertIn("todo_status", result.stderr)
 
 
 if __name__ == "__main__":

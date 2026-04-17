@@ -1,7 +1,6 @@
 .DS_Store
 target/
 logs/
-runtime/
 .env
 .env
 !skills/.env.example
@@ -25,10 +24,6 @@ config/*.yml
 **/.omc/
 **/.sandbox-home/
 **/.clawd-todos.json
-
-vendor/claw-code/target/
-vendor/claw-code/.git/
-vendor/claw-code/.claude.json
 
 
 __pycache__

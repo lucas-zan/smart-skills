@@ -40,7 +40,7 @@ def ensure_workflow(repo_root: Path, config_path: str) -> tuple[Path, bool]:
     settings = resolve_release_settings(config)
     workflow_path = repo_root / ".github" / "workflows" / settings["workflow_name"]
     workflow_path.parent.mkdir(parents=True, exist_ok=True)
-    workflow_path.write_text(build_workflow_yaml(settings))
+    workflow_path.write_text(build_workflow_yaml(repo_root, settings))
     return workflow_path, True
 
 

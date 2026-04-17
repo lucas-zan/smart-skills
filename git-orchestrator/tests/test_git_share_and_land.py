@@ -150,11 +150,16 @@ class GitShareAndLandTests(unittest.TestCase):
 
             self.git(worker, "config", "user.email", "test@example.com")
             self.git(worker, "config", "user.name", "tester")
+            (worker / "go.mod").write_text("module example.com/demo\n\ngo 1.24\n")
             (worker / "docs" / "requirements").mkdir(parents=True)
             (worker / "docs" / "design").mkdir(parents=True)
+            (worker / "docs" / "tests").mkdir(parents=True)
+            (worker / "docs" / "todo").mkdir(parents=True)
             (worker / "tests").mkdir()
             (worker / "docs" / "requirements" / "demo.md").write_text("requirement\n")
             (worker / "docs" / "design" / "demo.md").write_text("design\n")
+            (worker / "docs" / "tests" / "demo.md").write_text("test cases\n")
+            (worker / "docs" / "todo" / "demo.md").write_text("- [x] done\n")
             (worker / "tests" / "test_demo.py").write_text("def test_demo():\n    assert True\n")
             (worker / "local.txt").write_text("from worker\n")
 
@@ -169,8 +174,12 @@ class GitShareAndLandTests(unittest.TestCase):
                 "docs/requirements/demo.md",
                 "--design",
                 "docs/design/demo.md",
+                "--test-doc",
+                "docs/tests/demo.md",
                 "--test",
                 "tests/test_demo.py",
+                "--todo",
+                "docs/todo/demo.md",
                 env={
                     "VERIFY_CMD": "true",
                     "GIT_ORCHESTRATOR_BRANCH_DATE": "20260415010203",
@@ -526,11 +535,16 @@ class GitShareAndLandTests(unittest.TestCase):
 
             self.git(worker, "config", "user.email", "test@example.com")
             self.git(worker, "config", "user.name", "tester")
+            (worker / "go.mod").write_text("module example.com/demo\n\ngo 1.24\n")
             (worker / "docs" / "requirements").mkdir(parents=True)
             (worker / "docs" / "design").mkdir(parents=True)
+            (worker / "docs" / "tests").mkdir(parents=True)
+            (worker / "docs" / "todo").mkdir(parents=True)
             (worker / "tests").mkdir()
             (worker / "docs" / "requirements" / "demo.md").write_text("requirement\n")
             (worker / "docs" / "design" / "demo.md").write_text("design\n")
+            (worker / "docs" / "tests" / "demo.md").write_text("test cases\n")
+            (worker / "docs" / "todo" / "demo.md").write_text("- [x] done\n")
             (worker / "tests" / "test_demo.py").write_text("def test_demo():\n    assert True\n")
 
             fakebin, record_path = self.make_uv_wrapper(root)
@@ -546,8 +560,12 @@ class GitShareAndLandTests(unittest.TestCase):
                 "docs/requirements/demo.md",
                 "--design",
                 "docs/design/demo.md",
+                "--test-doc",
+                "docs/tests/demo.md",
                 "--test",
                 "tests/test_demo.py",
+                "--todo",
+                "docs/todo/demo.md",
                 env={
                     "VERIFY_CMD": "true",
                     "GIT_ORCHESTRATOR_BRANCH_DATE": "20260415010203",
@@ -566,6 +584,58 @@ class GitShareAndLandTests(unittest.TestCase):
             self.assertTrue((landed / ".github" / "workflows" / "release.yml").is_file())
             self.assertFalse((landed / "git-orchestrator").exists())
             self.assertIn("workflow_dispatch:", (landed / ".github" / "workflows" / "release.yml").read_text())
+
+    def test_share_and_land_stops_when_todo_is_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            remote = root / "remote.git"
+            seed = root / "seed"
+            worker = root / "worker"
+
+            self.init_remote(remote, seed)
+            self.clone(remote, worker)
+
+            self.git(worker, "config", "user.email", "test@example.com")
+            self.git(worker, "config", "user.name", "tester")
+            (worker / "docs" / "requirements").mkdir(parents=True)
+            (worker / "docs" / "design").mkdir(parents=True)
+            (worker / "docs" / "tests").mkdir(parents=True)
+            (worker / "docs" / "todo").mkdir(parents=True)
+            (worker / "tests").mkdir()
+            (worker / "docs" / "requirements" / "demo.md").write_text("requirement\n")
+            (worker / "docs" / "design" / "demo.md").write_text("design\n")
+            (worker / "docs" / "tests" / "demo.md").write_text("test cases\n")
+            (worker / "docs" / "todo" / "demo.md").write_text("- [x] done\n- [ ] pending\n")
+            (worker / "tests" / "test_demo.py").write_text("def test_demo():\n    assert True\n")
+            (worker / "local.txt").write_text("from worker\n")
+
+            result = self.run_script(
+                worker,
+                "--confirmed",
+                "--slug",
+                "demo",
+                "--subject",
+                "feat(repo): share worker change",
+                "--requirement",
+                "docs/requirements/demo.md",
+                "--design",
+                "docs/design/demo.md",
+                "--test-doc",
+                "docs/tests/demo.md",
+                "--test",
+                "tests/test_demo.py",
+                "--todo",
+                "docs/todo/demo.md",
+                env={
+                    "VERIFY_CMD": "true",
+                    "GIT_ORCHESTRATOR_BRANCH_DATE": "20260415010203",
+                },
+                check=False,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Submission readiness check failed", result.stderr)
+            self.assertIn("todo_status", result.stderr)
 
     def make_uv_wrapper(self, root: Path) -> tuple[Path, Path]:
         real_uv = shutil.which("uv")

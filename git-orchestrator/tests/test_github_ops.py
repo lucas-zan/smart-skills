@@ -1,6 +1,7 @@
 import importlib.util
 import io
 import json
+import tarfile
 import tempfile
 import types
 import unittest
@@ -24,6 +25,7 @@ def load_module():
 class FakeClient:
     def __init__(self) -> None:
         self.calls = []
+        self.uploaded_assets = []
 
     def repo_path(self) -> str:
         return "/repos/example/repo"
@@ -78,6 +80,37 @@ class FakeClient:
             }
         raise AssertionError(f"unexpected request: {(method, path, body, query)}")
 
+    def workflow_dispatch_status(self, workflow):
+        self.calls.append(("WORKFLOW_STATUS", workflow, None, None))
+        return {
+            "available": True,
+            "default_branch": "main",
+        }
+
+    def resolve_commit_sha(self, ref):
+        self.calls.append(("RESOLVE_SHA", ref, None, None))
+        return "fc59364abcdef"
+
+    def create_github_release(self, ref, tag_name=None):
+        self.calls.append(("CREATE_RELEASE", ref, tag_name, None))
+        resolved_tag = tag_name or "v2026.04.16-fc59364"
+        return {
+            "id": 201,
+            "tag_name": resolved_tag,
+            "html_url": f"https://example.test/releases/{resolved_tag}",
+            "target_commitish": ref,
+            "upload_url": "https://uploads.example.test/repos/example/repo/releases/201/assets{?name,label}",
+            "assets": [],
+        }
+
+    def upload_release_asset(self, release, asset_path):
+        self.uploaded_assets.append(asset_path)
+        return {
+            "name": asset_path.name,
+            "size": asset_path.stat().st_size,
+            "browser_download_url": f"https://example.test/assets/{asset_path.name}",
+        }
+
 
 class GitHubOpsTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -102,7 +135,7 @@ class GitHubOpsTests(unittest.TestCase):
                 "CLAW_GITHUB_TOKEN": "claw-token",
             },
             clear=True,
-        ):
+        ), patch.object(module.GitHubClient, "_resolve_token", return_value="claw-token"):
             client = module.GitHubClient(owner=None, repo=None)
 
         self.assertEqual(client.token, "claw-token")
@@ -119,7 +152,7 @@ class GitHubOpsTests(unittest.TestCase):
                 "CLAW_GITHUB_TOKEN": "",
             },
             clear=True,
-        ):
+        ), patch.object(module.GitHubClient, "_resolve_token", return_value="dotenv-token"):
             client = module.GitHubClient(owner=None, repo=None)
 
         self.assertEqual(client.token, "dotenv-token")
@@ -136,12 +169,12 @@ class GitHubOpsTests(unittest.TestCase):
                 "CLAW_GITHUB_TOKEN": "process-token",
             },
             clear=True,
-        ):
+        ), patch.object(module.GitHubClient, "_resolve_token", return_value="dotenv-token"):
             client = module.GitHubClient(owner=None, repo=None)
 
         self.assertEqual(client.token, "dotenv-token")
 
-    def test_client_rejects_missing_claw_github_token(self) -> None:
+    def test_client_rejects_missing_github_api_token(self) -> None:
         module = load_module()
         self.skills_env.unlink(missing_ok=True)
 
@@ -156,7 +189,28 @@ class GitHubOpsTests(unittest.TestCase):
             with self.assertRaises(SystemExit) as ctx:
                 module.GitHubClient(owner=None, repo=None)
 
-        self.assertIn("Missing CLAW_GITHUB_TOKEN", str(ctx.exception))
+        self.assertIn("Missing GitHub API token", str(ctx.exception))
+
+    def test_client_uses_git_credential_token_when_claw_token_cannot_access_repo(self) -> None:
+        module = load_module()
+        self.skills_env.unlink(missing_ok=True)
+
+        with patch.dict(
+            module.os.environ,
+            {
+                "GITHUB_OWNER": "example",
+                "GITHUB_REPO": "repo",
+                "CLAW_GITHUB_TOKEN": "bad-token",
+            },
+            clear=True,
+        ), patch.object(module, "candidate_github_tokens", return_value=["bad-token", "git-credential-token"]), patch.object(
+            module.GitHubClient,
+            "_token_has_repo_access",
+            side_effect=[False, True],
+        ):
+            client = module.GitHubClient(owner=None, repo=None)
+
+        self.assertEqual(client.token, "git-credential-token")
 
     def test_flow_auth_guard_stops_when_remote_is_not_ready(self) -> None:
         module = load_module()
@@ -279,6 +333,201 @@ class GitHubOpsTests(unittest.TestCase):
         self.assertEqual(dispatch_call[2]["ref"], "main")
         self.assertEqual(dispatch_call[2]["inputs"]["platforms"], "macos,linux")
         self.assertEqual(dispatch_call[2]["inputs"]["publish"], "true")
+
+    def test_dispatch_release_without_config_does_not_require_auth(self) -> None:
+        module = load_module()
+        stdout = io.StringIO()
+
+        with patch.object(
+            module,
+            "resolve_release_dispatch",
+            return_value={"enabled": False, "dispatched": False, "reason": "not_configured"},
+        ), patch.object(
+            module,
+            "ensure_auth_ready_for_flow",
+            side_effect=AssertionError("auth should not run"),
+        ), patch.object(module.sys, "argv", ["github_ops.py", "dispatch-release"]), redirect_stdout(stdout):
+            module.main()
+
+        payload = module.json.loads(stdout.getvalue())
+        self.assertFalse(payload["enabled"])
+        self.assertEqual(payload["reason"], "not_configured")
+
+    def test_build_local_release_archives_creates_macos_and_linux_packages(self) -> None:
+        module = load_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "README.md").write_text("hello\n")
+            (repo_root / "LICENSE").write_text("license\n")
+            (repo_root / ".gocache").mkdir()
+            (repo_root / ".gocache" / "huge-cache").write_text("ignored\n")
+            (repo_root / "build").mkdir()
+            (repo_root / "build" / "app-linux").write_text("linux-binary\n")
+            (repo_root / "build" / "app-macos").write_text("macos-binary\n")
+
+            archives = module.build_local_release_archives(
+                repo_root=repo_root,
+                version="v2026.04.16-fc59364",
+                platforms=["macos", "linux"],
+                package_settings={
+                    "mode": "prebuilt",
+                    "binary_name": "app",
+                    "prebuilt_binaries": {
+                        "linux": ["build/app-linux"],
+                        "macos": ["build/app-macos"],
+                    },
+                    "include_globs": ["README*", "LICENSE*"],
+                },
+            )
+
+            self.assertEqual(
+                sorted(path.name for path in archives),
+                sorted(
+                    [
+                        f"{repo_root.name}-v2026.04.16-fc59364-macos.tar.gz",
+                        f"{repo_root.name}-v2026.04.16-fc59364-linux.tar.gz",
+                    ]
+                ),
+            )
+            for archive in archives:
+                with tarfile.open(archive, "r:gz") as bundle:
+                    names = bundle.getnames()
+                self.assertIn("README.md", names)
+                self.assertIn("LICENSE", names)
+                self.assertIn("app", names)
+                self.assertNotIn(".gocache/huge-cache", names)
+                self.assertNotIn("build/app-linux", names)
+                self.assertNotIn("build/app-macos", names)
+
+    def test_build_local_release_archives_can_build_go_binaries(self) -> None:
+        module = load_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "go.mod").write_text("module example.com/demo\n\ngo 1.24\n")
+            (repo_root / "main.go").write_text(
+                "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"hello\") }\n"
+            )
+            (repo_root / "README.md").write_text("hello\n")
+
+            calls = []
+
+            def fake_run(cmd, cwd=None, check=None, env=None, **kwargs):
+                calls.append((cmd, cwd, env))
+                output_path = Path(cmd[cmd.index("-o") + 1])
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.write_text(f"built for {env['GOOS']}\n")
+                return types.SimpleNamespace(returncode=0)
+
+            with patch.object(module.subprocess, "run", side_effect=fake_run):
+                archives = module.build_local_release_archives(
+                    repo_root=repo_root,
+                    version="v2026.04.16-fc59364",
+                    platforms=["macos", "linux"],
+                    package_settings={
+                        "mode": "go",
+                        "binary_name": "demo",
+                        "main_package": ".",
+                        "include_globs": ["README*"],
+                        "arch": "amd64",
+                    },
+                )
+
+            self.assertEqual(len(calls), 2)
+            gooses = sorted(call[2]["GOOS"] for call in calls)
+            self.assertEqual(gooses, ["darwin", "linux"])
+            for archive in archives:
+                with tarfile.open(archive, "r:gz") as bundle:
+                    names = bundle.getnames()
+                self.assertIn("demo", names)
+                self.assertIn("README.md", names)
+                self.assertNotIn("main.go", names)
+
+    def test_dispatch_release_falls_back_to_local_release_assets(self) -> None:
+        module = load_module()
+        client = FakeClient()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "README.md").write_text("hello\n")
+            (repo_root / "dist").mkdir()
+            (repo_root / "dist" / "app-linux").write_text("linux-binary\n")
+            (repo_root / "dist" / "app-macos").write_text("macos-binary\n")
+            config = repo_root / ".git-orchestrator.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "release": {
+                            "after_merge": {
+                                "enabled": True,
+                                "workflow": "release.yml",
+                                "platforms": ["macos", "linux"],
+                                "inputs": {
+                                    "publish": "true",
+                                    "version": "v2026.04.16-fc59364",
+                                },
+                                "package": {
+                                    "mode": "prebuilt",
+                                    "binary_name": "app",
+                                    "prebuilt_binaries": {
+                                        "linux": ["dist/app-linux"],
+                                        "macos": ["dist/app-macos"],
+                                    },
+                                    "include_globs": ["README*"],
+                                },
+                            }
+                        },
+                        "workflows": {
+                            "release.yml": {
+                                "default_ref": "main",
+                                "required_inputs": ["platforms", "publish"],
+                                "allowed_inputs": ["platforms", "publish", "version"],
+                            }
+                        },
+                    }
+                )
+            )
+            args = types.SimpleNamespace(
+                config=str(config),
+                ref="3.55.0-autofix",
+                wait=False,
+                timeout=30,
+                interval=1,
+                input=[],
+            )
+
+            with patch.object(module, "find_repo_root", return_value=repo_root), patch.object(
+                client,
+                "workflow_dispatch_status",
+                return_value={
+                    "available": False,
+                    "reason": "workflow_not_visible_on_default_branch",
+                    "default_branch": "main",
+                    "message": "Not Found",
+                },
+            ), patch.object(module.Path, "cwd", return_value=repo_root):
+                summary = module.dispatch_release(client, args)
+
+        self.assertEqual(summary["mode"], "github_release_fallback")
+        self.assertEqual(summary["release"]["tag_name"], "v2026.04.16-fc59364")
+        self.assertEqual(
+            sorted(asset["name"] for asset in summary["assets"]),
+            sorted(
+                [
+                    f"{repo_root.name}-v2026.04.16-fc59364-macos.tar.gz",
+                    f"{repo_root.name}-v2026.04.16-fc59364-linux.tar.gz",
+                ]
+            ),
+        )
+        self.assertEqual(len(client.uploaded_assets), 2)
+        for archive in client.uploaded_assets:
+            with tarfile.open(archive, "r:gz") as bundle:
+                names = bundle.getnames()
+            self.assertIn("README.md", names)
+            self.assertIn("app", names)
+            self.assertNotIn("dist/app-linux", names)
+            self.assertNotIn("dist/app-macos", names)
 
     def test_merge_pr_triggers_release_after_merge_when_enabled(self) -> None:
         module = load_module()
