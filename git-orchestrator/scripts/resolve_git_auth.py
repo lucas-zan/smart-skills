@@ -31,20 +31,18 @@ def github_auth_args(remote_url: str) -> list[str]:
     if remote_url.startswith("git@github.com:") or (
         parsed.scheme == "ssh" and parsed.hostname == "github.com"
     ):
-        raise SystemExit(
-            "GitHub remote must use HTTPS. Change origin to https://github.com/<owner>/<repo>.git."
-        )
+        return []
 
     if parsed.scheme == "http" and parsed.hostname == "github.com":
         raise SystemExit(
-            "GitHub remote must use HTTPS. Change origin to https://github.com/<owner>/<repo>.git."
+            "GitHub remote must use HTTPS or SSH. Change origin to https://github.com/<owner>/<repo>.git or git@github.com:<owner>/<repo>.git."
         )
 
     if parsed.scheme == "https" and parsed.hostname == "github.com":
         token = get_env("CLAW_GITHUB_TOKEN")
         if not token:
             raise SystemExit(
-                "Missing CLAW_GITHUB_TOKEN for HTTPS GitHub remote authentication. Export it or set skills/.env."
+                "Missing CLAW_GITHUB_TOKEN for HTTPS GitHub remote authentication. Export it or set skills/.env. If HTTPS is not available here, ask whether to switch origin to SSH."
             )
         basic = base64.b64encode(f"x-access-token:{token}".encode("utf-8")).decode("ascii")
         return [

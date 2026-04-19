@@ -185,7 +185,7 @@ class GitHubOpsTests(unittest.TestCase):
                 "GITHUB_REPO": "repo",
             },
             clear=True,
-        ):
+        ), patch.object(module, "candidate_github_tokens", return_value=[]):
             with self.assertRaises(SystemExit) as ctx:
                 module.GitHubClient(owner=None, repo=None)
 
@@ -221,13 +221,14 @@ class GitHubOpsTests(unittest.TestCase):
                 "remote_url": remote_url,
                 "remote_kind": "github_ssh",
                 "checks": {
-                    "uses_https_for_github": False,
+                    "git_transport_ready": True,
                     "claw_github_token_present": False,
+                    "github_api_auth_ready": False,
                 },
-                "ready": False,
-                "advice": ["Change origin to HTTPS"],
+                "ready": True,
+                "advice": ["Current remote uses SSH for git transport.", "Export CLAW_GITHUB_TOKEN or switch origin to HTTPS."],
             },
-            emit_text=lambda diagnosis, stream: stream.write("Change origin to HTTPS\n"),
+            emit_text=lambda diagnosis, stream: stream.write("Export CLAW_GITHUB_TOKEN or switch origin to HTTPS.\n"),
         )
 
         with patch.object(module, "load_diagnose_module", return_value=fake_diagnose):

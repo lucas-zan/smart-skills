@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -31,7 +32,7 @@ class DiagnoseAuthTests(unittest.TestCase):
         if env is not None:
             merged_env.update(env)
         return subprocess.run(
-            ["uv", "run", "python", str(SCRIPT), *args],
+            [sys.executable, str(SCRIPT), *args],
             cwd=ROOT,
             env=merged_env,
             check=check,
@@ -63,9 +64,11 @@ class DiagnoseAuthTests(unittest.TestCase):
 
         payload = json.loads(result.stdout)
         self.assertFalse(payload["ready"])
+        self.assertFalse(payload["checks"]["git_transport_ready"])
         self.assertFalse(payload["checks"]["github_api_auth_ready"])
         self.assertFalse(payload["checks"]["release_dispatch_auth_ready"])
         self.assertIn("Export CLAW_GITHUB_TOKEN", "\n".join(payload["advice"]))
+        self.assertIn("switch origin to SSH", "\n".join(payload["advice"]))
 
     def test_github_https_with_token_reports_release_auth_ready_but_config_is_separate(self) -> None:
         result = self.run_script(
@@ -91,16 +94,19 @@ class DiagnoseAuthTests(unittest.TestCase):
         self.assertTrue(payload["ready"])
         self.assertTrue(payload["checks"]["claw_github_token_present"])
 
-    def test_github_ssh_reports_https_requirement(self) -> None:
+    def test_github_ssh_is_ready_for_git_transport(self) -> None:
         result = self.run_script(
             "--remote-url",
             "git@github.com:example/repo.git",
         )
 
         payload = json.loads(result.stdout)
-        self.assertFalse(payload["ready"])
+        self.assertTrue(payload["ready"])
         self.assertEqual(payload["remote_kind"], "github_ssh")
-        self.assertIn("Change origin to HTTPS", "\n".join(payload["advice"]))
+        self.assertTrue(payload["checks"]["git_transport_ready"])
+        self.assertFalse(payload["checks"]["github_api_auth_ready"])
+        self.assertIn("will use SSH", "\n".join(payload["advice"]))
+        self.assertIn("switch origin to HTTPS", "\n".join(payload["advice"]))
 
     def test_can_inspect_repo_remote_when_remote_url_not_passed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -115,7 +121,7 @@ class DiagnoseAuthTests(unittest.TestCase):
             )
 
             result = subprocess.run(
-                ["uv", "run", "python", str(SCRIPT)],
+                [sys.executable, str(SCRIPT)],
                 cwd=repo,
                 env={
                     "PATH": os.environ.get("PATH", ""),
@@ -131,13 +137,28 @@ class DiagnoseAuthTests(unittest.TestCase):
         payload = json.loads(result.stdout)
         self.assertTrue(payload["ready"])
 
-    def test_require_ready_fails_with_stderr_advice(self) -> None:
+    def test_require_ready_for_git_succeeds_with_github_ssh(self) -> None:
         result = self.run_script(
             "--remote-url",
             "git@github.com:example/repo.git",
             "--require-ready",
+            "--require-scope",
+            "git",
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_require_ready_for_api_fails_with_stderr_advice(self) -> None:
+        result = self.run_script(
+            "--remote-url",
+            "git@github.com:example/repo.git",
+            "--require-ready",
+            "--require-scope",
+            "api",
             check=False,
         )
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Change origin to HTTPS", result.stderr)
+        self.assertIn("switch origin to HTTPS", result.stderr)
+        self.assertIn("CLAW_GITHUB_TOKEN", result.stderr)

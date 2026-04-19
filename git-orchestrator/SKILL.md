@@ -1,6 +1,6 @@
 ---
 name: git-orchestrator
-description: "Use when an agent needs a repeatable Git or GitHub delivery workflow for branching, committing, pushing, pull requests, workflow dispatch, or share-and-land after explicit human confirmation."
+description: "Use when an agent needs a repeatable Git or GitHub delivery workflow for branching, committing, pushing, pull requests, workflow dispatch, share-and-land after explicit human confirmation, or cleaning mistakenly tracked files from Git history before continuing delivery."
 ---
 
 # Git Orchestrator
@@ -14,6 +14,8 @@ Good fits:
 - open, inspect, sync, or merge a PR
 - trigger or watch a GitHub Actions workflow
 - share-and-land after explicit human confirmation
+- inspect when a sensitive or local-only file entered Git history
+- stop tracking or purge a mistakenly committed file, then continue the delivery flow
 - bootstrap release automation into the current branch before merge
 
 Do not use this skill for code review, design review, or deciding whether the change itself is correct.
@@ -38,15 +40,24 @@ Route the request before doing any work. Do not run the full submit flow when th
 | Resolve workflow inputs | `uv run python scripts/resolve_workflow_inputs.py ...` |
 | Dispatch or watch a workflow run | `uv run python scripts/github_ops.py dispatch-workflow ...` or `wait-run ...` |
 | Share-and-land | `bash scripts/git_share_and_land.sh ...` |
+| Inspect why a file is still being uploaded | `bash scripts/git_cleanup_history.sh --inspect --path <path>` |
+| Stop tracking a local-only file without rewriting history | `git rm --cached -- <path>` then continue with normal commit / PR / share-and-land flow |
+| Purge a file from Git history after explicit confirmation | `bash scripts/git_cleanup_history.sh --confirmed --path <path> [--path <path> ...]` then continue the delivery flow |
 
 ## Hard Truths
 
 - Plain git does not create PRs, inspect PRs, or dispatch GitHub Actions workflows. Use `scripts/github_ops.py` for those tasks.
+- `.gitignore` does not untrack a file that is already committed. If a file is already in history, you must either stop tracking it with `git rm --cached` or rewrite history.
+- History cleanup is part of the delivery lifecycle when the user asks for it, but it is a high-risk subflow. Never run history rewrites as part of the default submit path.
+- Prefer `scripts/git_cleanup_history.sh`, which uses `git filter-repo` and restores the active branch upstream mapping after force-push.
+- Do not use `git filter-branch` unless the user explicitly requires it and accepts the tradeoff.
 - Evidence gating is real. `validate_change_basis.py` can return `ok`, `failed`, or `skipped` depending on repo policy.
 - Submit flows now run a stricter preflight TODO checklist before evidence gating: requirements doc, design doc, test doc, test code, and TODO completion must pass before commit/share begins.
 - Repo policy can disable those submit-time gates with `policy.evidence.pre_commit_checks_enabled: false`. Keep backward compatibility with `policy.evidence.enforce_before_commit: false`.
 - Direct share-and-land always needs explicit human confirmation.
-- For GitHub HTTPS remotes, auth may come from the current environment or `skills/.env`.
+- History rewrites always need explicit human confirmation.
+- For GitHub HTTPS remotes, git auth may come from the current environment or `skills/.env`.
+- For GitHub SSH remotes, git transport should use the local SSH setup; GitHub API operations still need `CLAW_GITHUB_TOKEN`.
 
 ## Branch Naming Truth
 
@@ -64,16 +75,25 @@ For deterministic tests or automation, `GIT_ORCHESTRATOR_BRANCH_DATE` overrides 
 
 ### Base Local Git Flow
 
-Require these before branch, commit, verify, or share-and-land flows:
+Require these before branch, commit, verify, history inspection, history cleanup, or share-and-land flows:
 - current directory is inside a git repository
 - `git` is available
 - `uv` is available for Python helper scripts
 - the requested remote exists when the task needs fetch or push
 
-### GitHub HTTPS / API Flow
+### History Cleanup Flow
+
+Require these before rewriting history:
+- explicit human confirmation that force-push and history rewrite are intended
+- the target file or path is known exactly; do not guess destructive path patterns
+- the agent has checked whether simple untracking is sufficient before proposing a rewrite
+- `git filter-repo` is available, or the user has approved an alternative tool
+- the user understands secrets still need rotation even after the file is removed from history
+
+### GitHub Remote / API Flow
 
 Require these before PR or workflow operations:
-- the remote is GitHub HTTPS, not SSH
+- the remote is a GitHub remote; git transport should follow the current remote protocol first
 - `CLAW_GITHUB_TOKEN` is available from the shell environment or `skills/.env`
 - repository coordinates come from `--owner` / `--repo`, `GITHUB_OWNER` / `GITHUB_REPO`, or the `origin` remote
 
@@ -94,6 +114,25 @@ Require these before `git_share_and_land.sh`:
 - repo policy allows direct share-and-land
 - the base branch is not forced into PR-only mode by policy
 - verification can run locally before the base branch is pushed
+
+## History Cleanup Flow
+
+Use this flow only when the user explicitly asks to inspect or clean a tracked file, secret, or local-only artifact.
+
+1. Inspect whether the file is tracked now with `bash scripts/git_cleanup_history.sh --inspect --path <path>`.
+2. Inspect when it entered history with the same script output or `git log --follow -- <path>` and check `.gitignore` timing if relevant.
+3. Decide which branch of the flow applies:
+   - If the file only needs to stop being tracked going forward, use `git rm --cached -- <path>` and continue with the normal delivery flow.
+   - If the file must be removed from history, require explicit confirmation and explain that refs will be rewritten and force-pushed.
+4. For history rewrites, prefer `bash scripts/git_cleanup_history.sh --confirmed --path <path> [--path <path> ...]`.
+5. Verify removal after the rewrite with the script summary and history inspection commands such as `git log --all -- <path>` or `git rev-list --objects --all`.
+6. Continue the normal delivery flow:
+   - commit any follow-up `.gitignore` or sample-config changes
+   - push or force-push affected refs
+   - if requested, continue with PR, merge, or share-and-land
+7. After force-push, the cleanup script must check whether the current local branch still has upstream tracking configured and restore it if needed.
+8. After the delivery action, re-check that the file is no longer tracked or reachable in history.
+9. If secrets were ever committed, treat rotation as mandatory follow-up work, not optional cleanup.
 
 ## Core Flows
 
@@ -127,6 +166,19 @@ If the user asks for one operation only, do only that operation:
 
 Do not create branches, generate commits, or open new PRs unless the request requires it.
 
+### Delivery After Cleanup
+
+If history cleanup was part of the request, do not stop after the rewrite unless the user asked for inspection only.
+
+1. Finish the cleanup verification first.
+2. Commit any current-tree follow-up changes such as `.gitignore`, replacement docs, or sample config updates.
+3. Continue with the requested submit path:
+   - commit and push
+   - open or update a PR
+   - share-and-land
+4. After the final push or merge, run one more check that the target file is absent from the intended refs.
+5. Before reporting success, confirm the active local branch still tracks its intended upstream branch; if not, restore that mapping.
+
 ### Share-And-Land
 
 1. Require `--confirmed`.
@@ -153,13 +205,18 @@ Stop on these markers. Do not improvise around them.
 | Marker | Meaning | Next action |
 | --- | --- | --- |
 | `--confirmed is required` | share-and-land was requested without explicit human confirmation | stop and ask for confirmation |
+| `history rewrite confirmation required` | the user asked to purge history but did not explicitly approve rewriting history and force-pushing refs | stop and ask for confirmation |
+| `git filter-repo is required` | history rewrite was requested but the preferred rewrite tool is unavailable | stop and ask the user to install or approve an alternative |
+| `sensitive path is ambiguous` | the cleanup target is not specific enough for a destructive history rewrite | stop and ask for an exact path or path set |
+| `upstream branch mapping missing after rewrite` | history cleanup finished but the active local branch no longer tracks its remote branch | restore the upstream mapping before reporting success |
+| `secret rotation still required` | a committed secret was removed from history but not rotated | stop and report that cleanup is incomplete until rotation is handled |
 | `No staged changes to commit` | `--no-add-all` was used but nothing is staged | stop and ask the user to stage files or remove `--no-add-all` |
 | `Submission readiness check failed` | requirement/design/test-doc/test-code/TODO preflight failed | stop and ask for the missing or incomplete delivery evidence |
 | `Missing required change basis` | requirement, design, or test evidence failed the gate | stop and ask for the missing evidence or matching files |
 | `Workflow config file not found` | workflow defaults were requested but neither repo-root `.git-orchestrator.json` nor `git-orchestrator/.git-orchestrator.json` was found | stop and ask for config or explicit workflow inputs |
 | `Missing required workflow inputs` | dispatch payload is incomplete | stop and ask for the missing keys |
-| `GitHub remote must use HTTPS` | auth path is SSH or HTTP instead of GitHub HTTPS | stop and switch the remote to HTTPS |
-| `Missing CLAW_GITHUB_TOKEN` | GitHub HTTPS auth is unavailable from the environment and `skills/.env` | stop and ask for token setup |
+| `GitHub HTTP remotes are not supported` | auth path is HTTP instead of HTTPS or SSH | stop and switch the remote to HTTPS or SSH |
+| `Missing CLAW_GITHUB_TOKEN` | HTTPS git auth or GitHub API auth is unavailable from the environment and `skills/.env` | stop and ask for token setup, or ask whether to switch the git remote protocol |
 | `verification=failed` | verification failed after share-branch push | stop; do not attempt landing |
 | `merge=pull_request_required` | repo policy blocks direct landing to the base branch | stop and open a PR instead |
 | `conflict_resolution=blocked` | auto-resolution is disabled or not allowed for these paths | stop and hand conflict resolution to a human |
@@ -193,6 +250,20 @@ Expected raw outputs to preserve:
 - from commit/push: `branch=...`, `commit_sha=...`, `pushed=1`
 - from PR creation: PR number, URL, and state from JSON output
 
+User request: “remove `config.yaml` from history, then land the fix”
+
+1. Inspect tracking and history:
+   `git ls-files -- config.yaml`
+   `git log --follow -- config.yaml`
+2. After explicit confirmation, rewrite history:
+   `git filter-repo --path config.yaml --invert-paths`
+3. Verify removal:
+   `git log --all -- config.yaml`
+4. Commit follow-up current-tree fixes such as `.gitignore` or `config-sample.yaml` updates.
+5. Confirm the cleanup script reported a usable or restored upstream mapping for the active branch.
+6. Continue with the requested delivery action, for example:
+   `bash scripts/git_share_and_land.sh --confirmed --slug remove-config-yaml --subject "chore(repo): remove tracked config.yaml"`
+
 ## Checklist
 
 Before reporting success, confirm all applicable items:
@@ -204,6 +275,10 @@ Before reporting success, confirm all applicable items:
 - PR flows captured the PR number and URL
 - workflow flows captured the run ID and status
 - share-and-land flows captured `verification`, `merge`, `conflict_resolution`, and `conflict_context`
+- history-cleanup flows captured whether the file was only untracked or fully purged from history
+- history-cleanup flows verified removal after the final push or merge
+- history-cleanup flows verified the active local branch still had a usable upstream mapping, or restored it
+- committed secrets were called out for rotation when relevant
 - blockers were surfaced immediately instead of being worked around
 
 ## Reference Boundary

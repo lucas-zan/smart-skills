@@ -127,7 +127,8 @@ def ensure_auth_ready_for_flow() -> None:
     except SystemExit:
         return
     diagnosis = diagnose.build_diagnosis(remote_url)
-    if diagnosis["ready"]:
+    checks = diagnosis.get("checks", {})
+    if checks.get("github_api_auth_ready", diagnosis.get("ready")):
         return
     diagnose.emit_text(diagnosis, sys.stderr)
     raise SystemExit(1)

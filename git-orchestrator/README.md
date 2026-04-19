@@ -173,13 +173,19 @@ printenv CLAW_GITHUB_TOKEN
 
 对于排查，agent 侧只需要确认变量“是否存在”，不要回显 token 本身。
 
-对于 GitHub 仓库，远端建议统一使用：
+对于 GitHub 仓库，远端可以使用 HTTPS 或 SSH：
 
 ```bash
 git remote set-url origin https://github.com/<owner>/<repo>.git
 ```
 
-这样 API 调用和 git push / fetch / pull 都走同一套 HTTPS + 临时 token 认证链路。
+```bash
+git remote set-url origin git@github.com:<owner>/<repo>.git
+```
+
+- HTTPS remote 会优先走 `CLAW_GITHUB_TOKEN`
+- SSH remote 会优先走本地 SSH 配置
+- GitHub API 调用仍然需要 `CLAW_GITHUB_TOKEN`
 
 ## 推荐配置
 
@@ -355,9 +361,9 @@ bash skills/git-orchestrator/scripts/verify_repo.sh
 
 这些入口在执行网络操作前，会自动检查：
 
-- 当前 `origin` 是否为 GitHub HTTPS remote
-- `CLAW_GITHUB_TOKEN` 是否已在当前 shell 中设置，或者能从 `skills/.env` 读取
-- 当前状态是否满足 skill 的认证前提
+- 当前 `origin` 是 GitHub HTTPS 还是 SSH remote
+- 当前 git 路线是否满足前提：HTTPS 需要 token，SSH 需要本地 SSH 可用
+- GitHub API 路线是否满足前提：`CLAW_GITHUB_TOKEN` 已在当前 shell 中设置，或者能从 `skills/.env` 读取
 
 ### 生成 commit message
 
@@ -405,10 +411,10 @@ bash skills/git-orchestrator/scripts/git_share_and_land.sh \
 
 先确认当前仓库使用的是 HTTPS 还是 SSH。
 
-- 这个 skill 现在以 GitHub HTTPS 为标准路径
-- 如果 remote 还是 `git@github.com:...`，脚本会要求切换成 HTTPS
+- 如果当前 remote 是 HTTPS，脚本会先走 HTTPS；缺少 token 时会提示补全 `CLAW_GITHUB_TOKEN`，或询问是否切到 SSH
+- 如果当前 remote 是 SSH，脚本会先走 SSH；GitHub API 缺 token 时会提示补全 `CLAW_GITHUB_TOKEN`，SSH 本地不可用时应询问是否切到 HTTPS
 - `CLAW_GITHUB_TOKEN` 可以来自环境变量，或来自被忽略的 `skills/.env`
-- 现在主流程会自动做认证前置检查，并在失败时直接输出修复建议
+- 现在主流程会分别检查 git 传输能力和 GitHub API 能力，并在失败时输出切换建议
 
 ### 2. verification 失败
 
@@ -461,8 +467,8 @@ bash skills/git-orchestrator/scripts/git_share_and_land.sh \
 ## 当前还不够好的地方
 
 - `README.md` 之前和 `SKILL.md` 内容重复偏多，对人类使用者不够聚焦
-- git 认证现在可以统一走 `HTTPS + CLAW_GITHUB_TOKEN`
-- 缺少更强的“认证诊断”入口，比如自动提示当前是 SSH 还是 HTTPS、当前 token 是否可见
+- git 认证同时支持 `HTTPS + CLAW_GITHUB_TOKEN` 和本地 SSH
+- 认证诊断已经会提示当前使用的是 SSH 还是 HTTPS，但还没有主动探测 SSH key 是否可用
 - `.git-orchestrator.json` 还是可选约定，不是强约束，导致不同仓库行为可能不一致
 
 ## 建议

@@ -63,31 +63,43 @@ def build_diagnosis(remote_url: str) -> dict:
     remote_kind = classify_remote(remote_url)
     owner, repo = infer_github_repo(remote_url)
     token_present = bool(get_env("CLAW_GITHUB_TOKEN"))
-    github_api_auth_ready = remote_kind == "github_https" and token_present
+    github_remote = remote_kind in {"github_https", "github_http", "github_ssh"}
+    git_transport_ready = False
+    if remote_kind == "local":
+        git_transport_ready = True
+    elif remote_kind == "github_https":
+        git_transport_ready = token_present
+    elif remote_kind == "github_ssh":
+        git_transport_ready = True
+    elif remote_kind in {"https", "ssh"}:
+        git_transport_ready = True
+    github_api_auth_ready = github_remote and token_present
     release_dispatch_auth_ready = github_api_auth_ready
 
     checks = {
         "uses_https_for_github": remote_kind == "github_https",
+        "uses_ssh_for_github": remote_kind == "github_ssh",
         "claw_github_token_present": token_present,
+        "git_transport_ready": git_transport_ready,
         "github_api_auth_ready": github_api_auth_ready,
         "release_dispatch_auth_ready": release_dispatch_auth_ready,
     }
     advice: list[str] = []
 
-    if remote_kind == "local":
-        ready = True
-    else:
-        ready = remote_kind == "github_https" and token_present
+    ready = git_transport_ready
 
     if remote_kind == "github_ssh":
-        advice.append("Change origin to HTTPS: git remote set-url origin https://github.com/<owner>/<repo>.git")
+        advice.append("Current remote will use SSH for git transport.")
+        if not token_present:
+            advice.append("GitHub API operations still need CLAW_GITHUB_TOKEN. If SSH does not work, ask whether to switch origin to HTTPS or complete the local SSH setup.")
     elif remote_kind == "github_http":
-        advice.append("Use HTTPS instead of HTTP for GitHub remotes.")
+        advice.append("GitHub HTTP remotes are not supported. Switch origin to HTTPS or SSH.")
     elif remote_kind not in ("github_https", "local"):
-        advice.append("This skill is optimized for GitHub HTTPS remotes.")
+        advice.append("This skill is optimized for GitHub remotes.")
 
     if remote_kind == "github_https" and not token_present:
-        advice.append("Export CLAW_GITHUB_TOKEN in the current shell or set it in skills/.env before git or GitHub API operations.")
+        advice.append("Current remote will use HTTPS for git transport.")
+        advice.append("Export CLAW_GITHUB_TOKEN in the current shell or set it in skills/.env before git or GitHub API operations. If HTTPS does not work here, ask whether to switch origin to SSH.")
     elif github_api_auth_ready:
         advice.append("GitHub API auth is ready. If post-merge release still does not run, check .git-orchestrator.json release.after_merge and workflow inputs/tests.")
 
@@ -100,6 +112,15 @@ def build_diagnosis(remote_url: str) -> dict:
         "ready": ready,
         "advice": advice,
     }
+
+
+def ready_for_scope(diagnosis: dict, scope: str) -> bool:
+    checks = diagnosis.get("checks", {})
+    if scope == "git":
+        return bool(checks.get("git_transport_ready"))
+    if scope == "api":
+        return bool(checks.get("github_api_auth_ready"))
+    return bool(diagnosis.get("ready"))
 
 
 def emit_text(diagnosis: dict, stream) -> None:
@@ -117,6 +138,7 @@ def main() -> int:
     parser.add_argument("--remote-url")
     parser.add_argument("--format", choices=["json", "text"], default="json")
     parser.add_argument("--require-ready", action="store_true")
+    parser.add_argument("--require-scope", choices=["default", "git", "api"], default="default")
     args = parser.parse_args()
 
     remote_url = args.remote_url
@@ -129,7 +151,7 @@ def main() -> int:
     diagnosis = build_diagnosis(remote_url.strip())
 
     if args.require_ready:
-        if diagnosis["ready"]:
+        if ready_for_scope(diagnosis, args.require_scope):
             return 0
         emit_text(diagnosis, sys.stderr)
         return 1

@@ -59,7 +59,7 @@ load_git_auth_args() {
 
 ensure_auth_ready() {
   local remote_url="$1"
-  run_python "${SCRIPT_DIR}/diagnose_auth.py" --remote-url "$remote_url" --require-ready
+  run_python "${SCRIPT_DIR}/diagnose_auth.py" --remote-url "$remote_url" --require-ready --require-scope git
 }
 
 git_network() {
