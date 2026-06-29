@@ -2,8 +2,10 @@
 name: tdd-workflow
 description: >
   测试驱动的开发工作流，支持从单个 bug 修复到整个项目交付的全规模开发任务。
-  工作流程：理解需求 → 分析代码 → 判断规模 → 拆分任务（如需要）→ 生成 docs/todo list
-  → 对每个任务执行：设计方案 → 先写测试 → 实现代码 → 验证通过 → 更新 todo 状态，直到全部任务验证成功后才能交付。
+  工作流程：理解需求 → 分析代码 → 判断规模 → 生成含背景、原因、任务拆分、
+  逻辑设计、测试设计、验收方式的 docs/todo list → 先按 todo 设计生成测试样例
+  → 确认测试可失败 → 按任务顺序实现 → 用测试样例验收 → 更新 todo 状态，
+  直到全部任务验证成功后才能交付。
   触发场景：(1) 用户要求开发新功能 (2) 用户要求修复 bug (3) 用户要求重构或改造代码
   (4) 用户要求启动或继续一个项目的开发 (5) 用户说"先写测试"或"测试驱动"
   (6) 用户给出设计文档并要求实施开发。
@@ -16,6 +18,8 @@ description: >
 
 进入工作流后，先建立任务清单文件，再进入测试驱动开发。todo list 文件必须生成在 `docs/` 目录下，推荐命名为 `docs/todo-<task-slug>.md`。
 
+todo list 不是简单备忘录，而是本轮开发的执行计划和验收合同。它必须先定义为什么要做、当前背景、范围边界、每个小任务、每个任务的逻辑设计、测试样例设计、验证命令、验收标准和停止条件。后续测试、实现、验收都必须以这个文件为准。
+
 todo list 中的每个任务都必须使用以下状态之一：
 
 - `待执行`
@@ -24,6 +28,17 @@ todo list 中的每个任务都必须使用以下状态之一：
 - `验证失败`
 
 只有当 todo list 中所有任务都达到 `验证成功`，本轮任务才算完成，才能交付给用户。
+
+严格执行顺序：
+
+1. 先分析需求和代码现状
+2. 再创建/更新 `docs/todo-<task-slug>.md`
+3. 按 todo 中的设计先写测试样例
+4. 运行测试并确认新增测试能正确失败，或明确记录为什么无法制造失败态
+5. 按 todo 的任务顺序逐项实现
+6. 用该任务对应测试和验收命令验证
+7. 验证通过后立即更新状态，再进入下一项
+8. 全部任务为 `验证成功` 后才能交付
 
 ---
 
@@ -47,23 +62,197 @@ todo list 中的每个任务都必须使用以下状态之一：
 
 1. 在 `docs/` 目录下创建当前任务的 todo list 文件
 2. 将任务拆分为可验证的最小项；S 规模通常 1-3 项，M/L 规模按模块或里程碑拆分
-3. 每个任务项至少包含：
-   - 任务名称
-   - 目标/验收标准
-   - 当前状态
-4. 新建时所有未开始任务默认标记为 `待执行`
-5. 后续每完成一个任务项的实现与验证，就立即回写 todo list 状态
+3. todo 文件必须包含完整背景、设计、测试和验收信息
+4. 每个任务项必须能独立写测试、实现和验收
+5. 新建时所有未开始任务默认标记为 `待执行`
+6. 后续每完成一个任务项的测试、实现与验证，就立即回写 todo list 状态
 
 推荐格式：
 
 ```md
-# Todo List
+# Todo: <任务名称>
 
-| 任务 | 验收标准 | 状态 |
-|------|----------|------|
-| 修复路由回退逻辑 | 对应测试失败后修复并通过 | 待执行 |
-| 增加错误场景测试 | 覆盖非法输入和边界条件 | 待执行 |
+> Executor instructions: Follow this todo step by step. Generate tests from
+> the "Test design" section before implementation. Run each verification command
+> and confirm the expected result before moving to the next task. If a STOP
+> condition occurs, stop and report instead of improvising.
+
+## Status
+
+- **Priority**: P0/P1/P2/P3
+- **Effort**: S/M/L
+- **Risk**: LOW/MEDIUM/HIGH
+- **Depends on**: none or explicit dependencies
+- **Category**: bugfix/feature/refactor/security
+- **Planned at**: current branch/commit when available
+
+## Why this matters
+
+**Background**: What user need, bug, refactor pressure, or design requirement triggered this work.
+
+**Current state**: What the code does today, including relevant files, functions, routes, data flow, or observed failures.
+
+**Impact**: What breaks, leaks, blocks, or becomes hard to maintain if this is not done.
+
+**What improves**: What behavior, safety, extensibility, or user outcome improves when done.
+
+## Scope
+
+**In scope**:
+- File/module/function changes that are allowed.
+
+**Out of scope**:
+- Related but intentionally deferred changes.
+
+## Design
+
+Describe the implementation logic before writing tests:
+- Expected inputs, outputs, and constraints
+- Core behavior and edge cases
+- Boundaries around frameworks, storage, transport, SDKs, or vendors
+- Dependency direction and integration points
+- Error handling and state/conflict behavior
+
+## Tasks
+
+Use the overview table for scanning and the detailed task sections for execution.
+Every task must have exactly one checked status box.
+
+### Task overview
+
+| ID | Task | Acceptance summary | Status |
+|----|------|--------------------|--------|
+| T1 | Short task name | Observable result or command success | 待执行 |
+| T2 | Short task name | Observable result or command success | 待执行 |
+
+### T1: Short task name
+
+**Status**:
+- [x] 待执行
+- [ ] 待测试验证
+- [ ] 验证成功
+- [ ] 验证失败
+
+**Why**:
+Reason this task exists. Explain the business or technical background, risk, blocked workflow, or maintenance pressure.
+
+**What to do**:
+- Concrete file/module/function changes to make.
+- Expected behavior after the task is complete.
+- Inputs, outputs, constraints, and edge cases this task owns.
+
+**Logic design**:
+- How the implementation should work at a high level.
+- Which contracts, interfaces, or boundaries should be used.
+- How errors, invalid input, state changes, or conflicts should be handled.
+- Which dependencies should be mocked, stubbed, or isolated.
+
+**Test design**:
+- Tests to write before implementation.
+- Expected initial failure mode before implementation.
+- Normal behavior cases.
+- Edge, invalid input, error, and state/conflict cases when applicable.
+
+**Acceptance**:
+- Focused verification command and expected result.
+- Relevant suite/build/lint command and expected result.
+- Manual or observable check when automated verification is not enough.
+
+**Done criteria**:
+- [ ] Tests listed in this task's Test design were written before implementation
+- [ ] New tests were run and confirmed to fail for the expected reason before implementation, or the exception is documented here
+- [ ] Implementation follows this task's Logic design and stays inside this task's What to do
+- [ ] Focused verification command passes
+- [ ] Relevant suite/build/lint command passes when applicable
+- [ ] Task overview row status matches this task status
+- [ ] This task status is updated to `验证成功`
+
+### T2: Short task name
+
+**Status**:
+- [x] 待执行
+- [ ] 待测试验证
+- [ ] 验证成功
+- [ ] 验证失败
+
+**Why**:
+Reason this task exists.
+
+**What to do**:
+- Concrete file/module/function changes to make.
+
+**Logic design**:
+- How the implementation should work.
+
+**Test design**:
+- Tests to write before implementation.
+- Expected initial failure mode before implementation.
+
+**Acceptance**:
+- Commands and expected results.
+
+**Done criteria**:
+- [ ] Tests listed in this task's Test design were written before implementation
+- [ ] New tests were run and confirmed to fail for the expected reason before implementation, or the exception is documented here
+- [ ] Implementation follows this task's Logic design and stays inside this task's What to do
+- [ ] Focused verification command passes
+- [ ] Relevant suite/build/lint command passes when applicable
+- [ ] Task overview row status matches this task status
+- [ ] This task status is updated to `验证成功`
+
+## Test plan
+
+List the concrete tests to create before implementation:
+- Normal behavior tests
+- Edge case tests
+- Invalid input tests
+- Error behavior tests
+- State/conflict tests when applicable
+
+## Verification commands
+
+| Purpose | Command | Expected on success |
+|---------|---------|---------------------|
+| Focused tests | `<test command>` | exit 0 after implementation; expected failure before implementation |
+| Full relevant suite | `<test command>` | exit 0 |
+| Format/lint/build | `<command>` | exit 0 |
+
+## Done criteria
+
+Final delivery gate:
+
+- [ ] Every task's own Done criteria checklist is fully checked
+- [ ] Every task has exactly one checked Status value, and it is `验证成功`
+- [ ] Task overview shows every task as `验证成功`
+- [ ] No STOP condition remains unresolved
+
+## STOP conditions
+
+Stop and report if:
+
+- The current code differs materially from the Current state description
+- Required test infrastructure is missing and cannot be added safely
+- A dependency or external service cannot be isolated by mock/stub
+- Verification still fails after the configured fix loop
+- Completing the task would require out-of-scope changes
 ```
+
+Todo 文件可以按项目需要增加 “Current state excerpts”、“Manual testing”、“Maintenance notes” 等小节，但不能删除背景、设计、任务、测试计划、验收命令、完成标准和停止条件。
+
+### 任务拆分要求
+
+每个任务必须满足：
+
+- 有明确的业务/技术原因，不能只有“修改代码”
+- 有具体要做的内容，说明要改哪些文件、模块、函数或行为
+- 有实现逻辑设计，说明要怎么做，而不是只写结果
+- 有测试设计，说明先写哪些测试样例
+- 有验收方式，包含命令或可观察结果
+- 有四种状态的 checklist，且任意时刻只能勾选一个状态
+- 有自己的 Done criteria checklist，不能只依赖全局完成标准
+- 能在通过验收后独立更新为 `验证成功`
+
+任务不要拆得过碎。一次状态更新应对应一个可验证行为、接口、模块或风险点。
 
 ---
 
@@ -82,25 +271,30 @@ todo list 中的每个任务都必须使用以下状态之一：
 
 1. 列出需要新增/修改的文件
 2. 描述关键变更（函数签名、逻辑变化）
-3. 将当前待处理任务在 todo list 中保持为 `待执行`
-4. 输出方案给用户，确认后继续
+3. 将逻辑设计、测试设计、验收方式写入 todo list
+4. 将当前待处理任务在 todo list 中保持为 `待执行`
+5. 输出方案给用户；除非用户明确要求等待确认，否则继续执行
 
 ### Phase 3: 先写测试
 
 1. 检测项目测试框架和约定
-2. 编写测试，覆盖：正常路径 + 边界条件 + 错误场景
-3. 对外部依赖用 mock/stub
-4. 运行测试确认能正确**失败**
-5. 测试样例生成完成后，将对应任务状态更新为 `待测试验证`
+2. 严格根据 todo list 中该任务的 `Test design` 编写测试样例
+3. 测试必须覆盖：正常路径、边界条件、非法输入、错误场景；涉及状态或并发冲突时必须覆盖状态/冲突行为
+4. 对外部依赖用 mock/stub/fake 隔离
+5. 运行新增测试，确认能正确**失败**
+6. 如果无法制造失败态，必须在 todo list 中记录原因和替代验证方式
+7. 测试样例生成并验证失败态后，将对应任务状态更新为 `待测试验证`
 
 ### Phase 4: 实现代码
 
-1. 按方案实现，遵循现有代码风格
-2. 不做需求范围外的改动
+1. 只实现当前 `待测试验证` 任务
+2. 按 todo list 的逻辑设计实现，遵循现有代码风格
+3. 不做需求范围外的改动
+4. 当前任务未通过验收前，不开始下一项任务
 
 ### Phase 5: 验证 + 修复循环
 
-1. 运行相关测试
+1. 运行 todo list 中该任务的验收命令和相关测试
 2. 全部通过：将对应任务状态更新为 `验证成功`
 3. 有失败：将对应任务状态更新为 `验证失败`
 4. 分析原因 → 修复 → 重新测试（最多 5 轮）
@@ -125,11 +319,12 @@ todo list 中的每个任务都必须使用以下状态之一：
 2. 确定模块间的依赖顺序
 3. 用 TaskCreate 创建每个模块的子任务，用 addBlockedBy 标注依赖关系
 4. 在 todo list 中为每个模块创建对应条目，初始状态为 `待执行`
-5. 输出拆分方案给用户确认
+5. 每个模块条目都必须包含 Why、What to do、Logic design、Test design、Acceptance、状态 checklist 和 Done criteria checklist
+6. 输出拆分方案给用户；除非用户明确要求等待确认，否则继续执行
 
 ### Phase 3-6：按模块逐个执行
 
-按依赖顺序，对每个模块执行：写测试 → 实现 → 验证 → 更新 todo 状态。
+按依赖顺序，对每个模块执行：按 todo 设计写测试 → 确认测试失败 → 实现 → 验证 → 更新 todo 状态。
 
 一个模块通过后再开始下一个。每完成一个模块：
 
@@ -159,7 +354,8 @@ todo list 中的每个任务都必须使用以下状态之一：
 2. 每个里程碑再拆为具体的开发任务
 3. 用 TaskCreate 创建所有任务，用 addBlockedBy 标注依赖
 4. 在 todo list 中同步创建所有任务条目，初始状态为 `待执行`
-5. 输出完整计划给用户确认
+5. 每个任务条目都必须包含 Why、What to do、Logic design、Test design、Acceptance、状态 checklist 和 Done criteria checklist
+6. 输出完整计划给用户；除非用户明确要求等待确认，否则继续执行
 
 拆分原则：
 - 基础设施优先（数据库、配置、工具函数）
@@ -174,7 +370,7 @@ todo list 中的每个任务都必须使用以下状态之一：
 TaskList → 取出下一个未阻塞的任务
   → TaskUpdate(in_progress)
   → todo 状态保持/更新为 待执行
-  → 理解 → 设计 → 测试 → 实现 → 验证
+  → 理解 → 补充/确认 todo 设计 → 按设计写测试 → 确认失败 → 实现 → 验证
   → todo 状态更新为 验证成功 或 验证失败
   → TaskUpdate(completed 或 blocked)
   → 回到 TaskList
@@ -204,8 +400,13 @@ TaskList → 取出下一个未阻塞的任务
 ## 通用规则
 
 - **先生成 todo list，再写测试**是新增核心约束。任何规模都不跳过。
+- **todo list 必须包含背景、原因、任务拆分、逻辑设计、测试设计和验收方式**。缺少这些内容时不得开始写测试。
+- **测试样例必须来自 todo list 的测试设计**。如果实现过程中发现设计不足，先更新 todo list，再补测试或改实现。
 - **先测试后实现**仍然是核心约束。任何规模都不跳过测试。
+- **必须确认新增测试的失败态**。若受限于环境或测试类型无法做到，必须在 todo list 中记录原因和替代验收。
 - **每完成并验证一个 todo 项，就立即更新状态**，不能在最后一次性回填。
+- **每个 todo 项都有自己的 Done criteria checklist**。完成任务时必须逐项勾选该任务自己的验收项，再将该任务状态更新为 `验证成功`。
+- **一个任务验证成功后才能进入下一个任务**。不得批量实现多个 `待执行` 项后再统一验收。
 - **任务状态只能使用这四种**：`待执行`、`待测试验证`、`验证成功`、`验证失败`。
 - **todo list 全部为 `验证成功` 才能交付**。这是最终交付门槛。
 - **极小改动例外**：改一个常量、修一个 typo 等，也应补一个最小 todo 项，并在验证后更新状态。
