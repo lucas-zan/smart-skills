@@ -9,6 +9,7 @@ deploy/docker.prod.env
 .direnv/
 .idea/
 .vscode/
+.uv-cache/
 *.swp
 *.swo
 *~
